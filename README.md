@@ -66,28 +66,34 @@ Every module has two ways to practice:
 The one permitted network call is Pyodide's runtime, lazy-loaded only when a Python lab is
 opened, with a graceful offline fallback. Nothing else touches the network.
 
-**T1 — real execution.** The hand-rolled SQL engine runs your query for real and diffs it
-against the expected result — here the starter's `>` returns 39 rows and the check explains
-why the inclusive boundary needs `>=`:
+---
 
-![The C2 SQL lab: a real query result with an expected-result diff catching the > vs >= boundary bug](docs/screenshots/sql-lab.png)
+## Gallery
 
-**T2 — SparkSim.** The signature engine renders a DAG (shuffle boundaries as red "cross-dock"
-lines) and the logical → optimized → physical plans, with predicate pushdown shown live —
-here the fraud-score filter has moved *below* the join onto the scan:
+Every lab tier, running in the browser (screenshots captured from `player/index.html`):
 
-![SparkSim DAG and query plans, showing the filter pushed down below the join](docs/screenshots/sparksim-dag.png)
-
-**T3 — scripted traces.** Cluster-scale behavior no browser can honestly run. In E3, seller
-S-777's hot key melts one partition (the red task bar) while salting spreads it evenly:
-
-![The E3 skew trace, before/after: one hot partition stalling a stage vs the salted fix](docs/screenshots/skew-trace.png)
-
-And the capstone finale (H4) runs the whole platform once — six sources through
-Bronze/Silver/Gold and an orchestrated DAG — until the review queue lands at exactly 43 and
-the dashboard tiles turn green:
-
-![The H4 capstone finale: the whole NimbusMart platform running end to end to a green dashboard](docs/screenshots/finale-trace.png)
+<table>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/sql-lab.png" alt="C2 SQL lab: real query execution with an expected-result diff">
+<br><em><strong>T1 · SQL</strong> — real in-browser execution. The starter's <code>&gt;</code> returns 39 rows; the diff explains why the inclusive boundary needs <code>&gt;=</code> to reach 43.</em>
+</td>
+<td width="50%">
+<img src="docs/screenshots/sparksim-dag.png" alt="T2 SparkSim DAG and query plans with predicate pushdown">
+<br><em><strong>T2 · SparkSim</strong> — the DAG (red cross-dock shuffle lines) and the logical→optimized→physical plans, with the filter pushed down below the join.</em>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/skew-trace.png" alt="E3 skew trace: one hot partition stalling a stage vs the salted fix">
+<br><em><strong>T3 · Skew trace (E3)</strong> — seller S-777's hot key melts one partition (the red bar) while salting spreads it evenly. Before/after scrubber.</em>
+</td>
+<td width="50%">
+<img src="docs/screenshots/finale-trace.png" alt="H4 capstone finale: the whole platform running to a green dashboard">
+<br><em><strong>T3 · Capstone finale (H4)</strong> — the whole NimbusMart platform runs once, six sources to a green dashboard, review queue reconciling to 43.</em>
+</td>
+</tr>
+</table>
 
 ---
 
