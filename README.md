@@ -8,6 +8,8 @@ to a full Bronze/Silver/Gold lakehouse with an orchestrated DAG.
 The entire course is a **single self-contained file**: [`player/index.html`](player/index.html).
 No build step to *read* it, no server, no dependencies. Just open it.
 
+![The course landing page — sidebar navigation and the eight track cards](docs/screenshots/landing.png)
+
 ```
 # Windows
 start player\index.html
@@ -63,6 +65,17 @@ Every module has two ways to practice:
 
 The one permitted network call is Pyodide's runtime, lazy-loaded only when a Python lab is
 opened, with a graceful offline fallback. Nothing else touches the network.
+
+**T2 — SparkSim.** The signature engine renders a DAG (shuffle boundaries as red "cross-dock"
+lines) and the logical → optimized → physical plans, with predicate pushdown shown live —
+here the fraud-score filter has moved *below* the join onto the scan:
+
+![SparkSim DAG and query plans, showing the filter pushed down below the join](docs/screenshots/sparksim-dag.png)
+
+**T3 — scripted traces.** Cluster-scale behavior no browser can honestly run. In E3, seller
+S-777's hot key melts one partition (the red task bar) while salting spreads it evenly:
+
+![The E3 skew trace, before/after: one hot partition stalling a stage vs the salted fix](docs/screenshots/skew-trace.png)
 
 ---
 
