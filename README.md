@@ -66,6 +66,12 @@ Every module has two ways to practice:
 The one permitted network call is Pyodide's runtime, lazy-loaded only when a Python lab is
 opened, with a graceful offline fallback. Nothing else touches the network.
 
+**T1 — real execution.** The hand-rolled SQL engine runs your query for real and diffs it
+against the expected result — here the starter's `>` returns 39 rows and the check explains
+why the inclusive boundary needs `>=`:
+
+![The C2 SQL lab: a real query result with an expected-result diff catching the > vs >= boundary bug](docs/screenshots/sql-lab.png)
+
 **T2 — SparkSim.** The signature engine renders a DAG (shuffle boundaries as red "cross-dock"
 lines) and the logical → optimized → physical plans, with predicate pushdown shown live —
 here the fraud-score filter has moved *below* the join onto the scan:
