@@ -83,6 +83,12 @@ S-777's hot key melts one partition (the red task bar) while salting spreads it 
 
 ![The E3 skew trace, before/after: one hot partition stalling a stage vs the salted fix](docs/screenshots/skew-trace.png)
 
+And the capstone finale (H4) runs the whole platform once — six sources through
+Bronze/Silver/Gold and an orchestrated DAG — until the review queue lands at exactly 43 and
+the dashboard tiles turn green:
+
+![The H4 capstone finale: the whole NimbusMart platform running end to end to a green dashboard](docs/screenshots/finale-trace.png)
+
 ---
 
 ## Repository layout
