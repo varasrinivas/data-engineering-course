@@ -70,9 +70,16 @@ opened, with a graceful offline fallback. Nothing else touches the network.
 
 ## Gallery
 
-Every lab tier, running in the browser (screenshots captured from `player/index.html`):
+The player and every lab tier, running in the browser (screenshots captured from
+`player/index.html`):
 
 <table>
+<tr>
+<td colspan="2">
+<img src="docs/screenshots/landing.png" alt="The course landing page: sidebar navigation and the eight track cards">
+<br><em><strong>The player</strong> — the single-file course: sidebar navigation across all 8 tracks and 36 modules, warm-paper design system with a dark-mode variant.</em>
+</td>
+</tr>
 <tr>
 <td width="50%">
 <img src="docs/screenshots/sql-lab.png" alt="C2 SQL lab: real query execution with an expected-result diff">
