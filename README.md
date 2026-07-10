@@ -68,6 +68,95 @@ opened, with a graceful offline fallback. Nothing else touches the network.
 
 ---
 
+## Modules
+
+All 36 modules, with the lab tier and engine each uses (**T1** real execution · **T2**
+SparkSim · **T3** scripted trace). Every module also carries the other tier's ideas in its
+concept sections — the lab is just where you practice one of them.
+
+<details>
+<summary><strong>Show all 36 modules</strong></summary>
+
+**Track A — Foundations: From Backend to Data**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| A1 | Welcome to NimbusMart: Why Data Engineering | T3 · trace |
+| A2 | The Freight Line: Anatomy of a Data Platform | T3 · trace |
+| A3 | Files That Scale | T2 · SparkSim |
+| A4 | Partitioning, Compression &amp; the Small-Files Problem | T3 · trace |
+| A5 | Batch vs Streaming | T3 · trace |
+
+**Track B — Data Modeling &amp; the Lakehouse**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| B1 | From JPA Entities to Star Schemas | T1 · SQL |
+| B2 | Slowly Changing Dimensions | T1 · SQL |
+| B3 | Medallion Architecture | T3 · trace |
+| B4 | Warehouse, Lake, Lakehouse | T3 · trace |
+
+**Track C — The Working Toolkit**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| C1 | Python for Java Developers, Compressed | T1 · Pyodide |
+| C2 | SQL for Analytics | T1 · SQL |
+| C3 | Pandas as the Gateway | T1 · Pyodide |
+| C4 | Thinking in Data Quality | T1 · SQL |
+
+**Track D — Spark Core Mental Model**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| D1 | Why Spark: One JVM Is Not Enough | T3 · trace |
+| D2 | Driver, Executors, Cluster Managers | T2 · SparkSim |
+| D3 | DataFrames &amp; Lazy Evaluation | T2 · SparkSim |
+| D4 | Jobs, Stages, Tasks &amp; the Shuffle | T2 · SparkSim |
+| D5 | Catalyst &amp; Tungsten | T2 · SparkSim |
+
+**Track E — PySpark in Practice**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| E1 | Reading &amp; Writing at Scale | T2 · SparkSim |
+| E2 | Transformations Deep-Dive | T2 · SparkSim |
+| E3 | Joins: Broadcast, Sort-Merge &amp; Skew | T3 · trace |
+| E4 | Window Functions in Spark | T2 · SparkSim |
+| E5 | UDFs vs Built-ins | T3 · trace |
+| E6 | Incremental Processing &amp; Delta Lake | T2 · SparkSim |
+
+**Track F — Pipelines &amp; Orchestration**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| F1 | From Script to Pipeline | T2 · SparkSim |
+| F2 | Airflow DAGs | T3 · trace |
+| F3 | Backfills, Catch-up &amp; SLAs | T3 · trace |
+| F4 | CI/CD for Data Pipelines | T3 · trace |
+
+**Track G — Quality, Governance &amp; Ops**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| G1 | Data Contracts &amp; Schema Evolution | T1 · SQL |
+| G2 | Validation Gates | T2 · SparkSim |
+| G3 | Lineage, Cataloging &amp; Observability | T3 · trace |
+| G4 | Performance &amp; Cost Tuning Basics | T2 · SparkSim |
+
+**Track H — Capstone: The NimbusMart Platform**
+
+| Module | Title | Lab |
+|:------:|-------|-----|
+| H1 | Capstone Brief: The NimbusMart Platform | T1 · SQL |
+| H2 | Build Bronze → Silver | T2 · SparkSim |
+| H3 | Build Gold | T2 · SparkSim |
+| H4 | Orchestrate, Document, Demo | T3 · trace |
+
+</details>
+
+---
+
 ## Gallery
 
 The player and every lab tier, running in the browser (screenshots captured from
