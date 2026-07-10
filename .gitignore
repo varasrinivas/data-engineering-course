@@ -1,0 +1,17 @@
+# Dev-only tooling for the QA scripts (scripts/qa.js, smoke_dom.js, Playwright drivers).
+# The shipped deliverable — player/index.html — has zero runtime dependencies.
+node_modules/
+
+# Machine-local Claude Code permissions (keep .claude/commands/ tracked)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

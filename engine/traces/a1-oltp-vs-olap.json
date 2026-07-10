@@ -1,0 +1,106 @@
+{
+  "id": "a1-oltp-vs-olap",
+  "title": "One dashboard query vs the checkout that pays the bills",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "09:00. A new analyst wires a revenue dashboard straight at <code>orders-primary</code> — the same Postgres that every NimbusMart checkout writes to. The question looks innocent: revenue by country, plus the count of orders in the fraud-review queue (<code>fraud_score &gt;= FRAUD_REVIEW_THRESHOLD</code>, the 0.80 business rule). One <code>GROUP BY</code>. What could it cost?",
+      "state": {
+        "note": "target: <code>orders-primary</code> (OLTP row store) · 240,000,000 rows · 31 columns · the live checkout database"
+      },
+      "metrics": { "orders_millions": 240, "columns": 31 }
+    },
+    {
+      "t": 3,
+      "narration": "The query needs 3 columns — <code>country</code>, <code>total_amount</code>, <code>fraud_score</code> — but a <strong>row store keeps every column of a row glued together on disk</strong>. To read 3 fields it drags all 31 off the platters, row by row, 240M times. There is no index that helps a full aggregate; it is a sequential heap scan.",
+      "state": {
+        "bars": [
+          { "label": "columns the query needs", "value": 3, "max": 31, "unit": "cols" },
+          { "label": "columns the row store reads", "value": 31, "max": 31, "unit": "cols", "hot": true }
+        ],
+        "note": "row-oriented storage: the unit of I/O is the whole row, not the column you asked for"
+      },
+      "metrics": { "cols_needed": 3, "cols_read": 31, "rows_scanned_millions": 240 }
+    },
+    {
+      "t": 6,
+      "narration": "The scan holds its buffers and MVCC read snapshot for 40+ seconds. Checkout writes — the <code>INSERT ... orders</code> and the <code>UPDATE ... inventory</code> — now contend for the same pages, buffer pool, and I/O bandwidth. p99 checkout latency starts climbing off its healthy 45 ms floor.",
+      "state": {
+        "bars": [
+          { "label": "dashboard query", "value": 41, "max": 45, "unit": "s", "hot": true },
+          { "label": "checkout p99 (was 45 ms)", "value": 12, "max": 45, "unit": "×", "hot": true }
+        ],
+        "note": "the analytics scan and the checkout write are fighting over one machine's buffer pool"
+      },
+      "metrics": { "query_s": 41, "checkout_p99_ms": 540 }
+    },
+    {
+      "t": 9,
+      "narration": "It gets worse downstream. The long scan pins WAL cleanup, so the read replica that feeds other services falls behind: <strong>replica lag walks from 200 ms to 38 s</strong>. Now the mobile app's \"order history\" shows stale data too. One report has degraded three unrelated systems.",
+      "state": {
+        "bars": [
+          { "label": "replica lag (healthy 0.2 s)", "value": 38, "max": 40, "unit": "s", "hot": true }
+        ],
+        "note": "OLTP replicas are tuned for low-latency replay, not for absorbing a 40-second analytical scan upstream"
+      },
+      "metrics": { "replica_lag_s": 38, "healthy_lag_ms": 200 }
+    },
+    {
+      "t": 12,
+      "narration": "The business impact lands where it always does — at the till. Checkout p99 crosses the app's 3-second timeout; the payment step starts failing and retrying. During the 40 seconds the dashboard runs, roughly <strong>7% of in-flight carts error out and a share are abandoned</strong>. A revenue <em>report</em> is now <em>destroying</em> revenue.",
+      "state": {
+        "bars": [
+          { "label": "checkout p99", "value": 3.4, "max": 3.6, "unit": "s", "hot": true },
+          { "label": "app timeout", "value": 3.0, "max": 3.6, "unit": "s" }
+        ],
+        "note": "fulfillment impact: carts timing out at the payment step → abandoned checkouts during every dashboard refresh"
+      },
+      "metrics": { "checkout_p99_s": 3.4, "carts_failed_pct": 7 }
+    },
+    {
+      "t": 15,
+      "narration": "Reset. Point the exact same question at an <strong>OLAP columnar store</strong> — a nightly Parquet snapshot of orders in the analytics warehouse. Columnar storage lays each column out contiguously, so the engine reads only the 3 columns the query touches and skips the other 28 entirely.",
+      "state": {
+        "bars": [
+          { "label": "columns the query needs", "value": 3, "max": 31, "unit": "cols" },
+          { "label": "columns the columnar store reads", "value": 3, "max": 31, "unit": "cols" }
+        ],
+        "note": "column-oriented storage: read only <code>country, total_amount, fraud_score</code> — the other 28 never leave disk"
+      },
+      "metrics": { "cols_read": 3, "gb_read": 0.9, "gb_read_oltp": 9.4 }
+    },
+    {
+      "t": 18,
+      "narration": "Same rows, same aggregate, radically different bill: reading 3 compressed columns instead of 31 raw ones cuts bytes scanned ~10×, and dictionary/run-length encoding shrinks them further. <strong>41 s → 1.1 s.</strong> And critically, it runs on a separate cluster — the checkout database never feels it.",
+      "state": {
+        "bars": [
+          { "label": "OLTP row store", "value": 41, "max": 42, "unit": "s", "hot": true },
+          { "label": "OLAP columnar", "value": 1.1, "max": 42, "unit": "s" }
+        ],
+        "note": "isolation is half the win: analytics load lives on its own engine, not on the system of record"
+      },
+      "metrics": { "olap_s": 1.1, "oltp_s": 41, "speedup_x": 37 }
+    },
+    {
+      "t": 21,
+      "narration": "With analytics moved off the primary, checkout p99 settles back to its <strong>45 ms floor</strong> and replica lag returns to 200 ms — while the dashboard refreshes in about a second. Nobody had to choose between \"the analyst gets answers\" and \"customers can pay.\"",
+      "state": {
+        "bars": [
+          { "label": "checkout p99 (during scan)", "value": 3.4, "max": 3.6, "unit": "s", "hot": true },
+          { "label": "checkout p99 (analytics isolated)", "value": 0.045, "max": 3.6, "unit": "s" }
+        ],
+        "note": "the fulfillment line is quiet again because the workload that threatened it now lives somewhere else"
+      },
+      "metrics": { "checkout_p99_ms": 45, "replica_lag_ms": 200, "dashboard_s": 1.1 }
+    },
+    {
+      "t": 24,
+      "narration": "The whole of Track A hangs on this split. <strong>OLTP</strong> is built for millions of tiny point reads and writes — row storage, B-tree indexes, row locks, one authoritative copy. <strong>OLAP</strong> is built for a few enormous scanning aggregates — columnar storage, compression, no lock contention, replicated freely. They are not the same database tuned differently; they are opposite shapes. Data engineering is, in large part, the discipline of moving data from the first shape to the second — safely, on a schedule, without ever touching the till.",
+      "state": {
+        "note": "OLTP = system of record (write-optimized, row store) · OLAP = system of analysis (read-optimized, columnar) · the pipeline between them is the job"
+      },
+      "metrics": { "oltp_s": 41, "olap_s": 1.1 }
+    }
+  ]
+}

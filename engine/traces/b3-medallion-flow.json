@@ -1,0 +1,122 @@
+{
+  "id": "b3-medallion-flow",
+  "title": "One order_events batch through Bronze, Silver, Gold",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "02:00. Last night's clickstream lands in the raw zone: <strong>48,214 <code>order_events</code></strong> as newline-delimited JSON, straight off the ingestion topic. It is a mess on purpose — at-least-once delivery left duplicates, a few producers dropped the <code>device</code> field, and the newer app build started emitting an <code>app_version</code> column nobody agreed to. This is what actually arrives.",
+      "state": {
+        "files": { "count": 214, "avgKb": 231 },
+        "note": "raw landing zone · <code>events/dt=2026-07-08/*.json</code> — schema-on-read, nothing validated yet"
+      },
+      "metrics": { "raw_events": 48214 }
+    },
+    {
+      "t": 3,
+      "narration": "<strong>Bronze = the receiving dock: accept every truck, log everything, reject nothing.</strong> The ingest job appends all 48,214 rows verbatim and adds only lineage metadata — <code>_ingested_at</code>, <code>_source_file</code>. No dedup, no casting, no dropping bad rows. Bronze's one job is to be a faithful, replayable copy of what the source sent.",
+      "state": {
+        "bars": [
+          { "label": "rows landed", "value": 48214, "max": 48214 },
+          { "label": "rows kept in Bronze", "value": 48214, "max": 48214, "hot": false }
+        ],
+        "note": "append-only · +2 metadata columns · 0 rows filtered — Bronze never editorializes"
+      },
+      "metrics": { "bronze_rows": 48214, "rows_dropped": 0, "cols_added": 2 }
+    },
+    {
+      "t": 6,
+      "narration": "The schema drift rides straight through, and that is correct. <strong>2,893 rows carry no <code>device</code></strong>; <strong>3,857 rows carry an unexpected <code>app_version</code></strong>. Bronze widens its schema to the union of what it sees and stores the drift as-is — because the day you <em>need</em> to answer &ldquo;what did the source actually send on 07-08?&rdquo; the answer must not have been thrown away at the dock.",
+      "state": {
+        "bars": [
+          { "label": "rows missing device", "value": 2893, "max": 48214, "hot": true },
+          { "label": "rows with drifted app_version", "value": 3857, "max": 48214, "hot": true },
+          { "label": "rows clean-shaped", "value": 41464, "max": 48214 }
+        ],
+        "note": "Bronze schema = union of all observed columns · drift is preserved, not repaired"
+      },
+      "metrics": { "missing_device": 2893, "drift_app_version": 3857 }
+    },
+    {
+      "t": 9,
+      "narration": "<strong>Silver = the QC station: unpack, inspect, standardize, discard the damaged — with a record.</strong> First the boring, load-bearing work: cast <code>event_ts</code> from string to a real timestamp, coerce <code>event_type</code> to the known enum, and fill the missing <code>device</code> with an explicit <code>'unknown'</code> sentinel rather than a null that every downstream query has to remember to handle.",
+      "state": {
+        "note": "typing pass: <code>event_ts</code> → timestamp, <code>event_type</code> → enum, <code>device</code> null → <code>'unknown'</code> · the drifted <code>app_version</code> is mapped to the agreed contract column"
+      },
+      "metrics": { "bronze_rows": 48214, "columns_typed": 6 }
+    },
+    {
+      "t": 12,
+      "narration": "Deduplicate. At-least-once delivery meant the same <code>event_id</code> arrived more than once — <strong>1,206 duplicate rows</strong>. <code>dropDuplicates([\"event_id\"])</code> keeps one of each. This is the step that makes the pipeline idempotent: re-run the batch and Silver still holds exactly one row per real event. Bronze 48,214 → <strong>47,008</strong> distinct events.",
+      "state": {
+        "bars": [
+          { "label": "Bronze rows in", "value": 48214, "max": 48214 },
+          { "label": "duplicate event_id dropped", "value": 1206, "max": 48214, "hot": true },
+          { "label": "distinct events", "value": 47008, "max": 48214 }
+        ],
+        "note": "<code>dropDuplicates([\"event_id\"])</code> — dedup is a Silver responsibility, never Bronze's"
+      },
+      "metrics": { "duplicates_dropped": 1206, "distinct_events": 47008 }
+    },
+    {
+      "t": 15,
+      "narration": "Now the rows that fail the contract. <strong>543 rows have a null <code>order_id</code></strong> (an event with no order is uninterpretable), <strong>208 have an unparseable <code>event_ts</code></strong>, and <strong>96 carry an <code>event_type</code> outside the known enum</strong>. Silver does <em>not</em> silently drop them — it routes all 847 to a <code>quarantine_order_events</code> table with a <code>_reject_reason</code>, so they can be inspected and backfilled once the producer is fixed.",
+      "state": {
+        "bars": [
+          { "label": "null order_id → quarantine", "value": 543, "max": 847, "hot": true },
+          { "label": "bad event_ts → quarantine", "value": 208, "max": 847, "hot": true },
+          { "label": "unknown event_type → quarantine", "value": 96, "max": 847, "hot": true }
+        ],
+        "note": "quarantine, don't discard: 847 rows land in <code>quarantine_order_events</code> with a <code>_reject_reason</code> — a queryable dead-letter table"
+      },
+      "metrics": { "quarantined_rows": 847, "quarantine_tables": 1 }
+    },
+    {
+      "t": 18,
+      "narration": "Silver's promoted table is the trustworthy one: <strong>46,161 typed, deduped, contract-clean rows</strong> (47,008 distinct − 847 quarantined). Every column has a real type, every row satisfies the schema, and nothing was lost — the 847 rejects are one query away in quarantine. This is the table every analyst and every Gold job should build on.",
+      "state": {
+        "bars": [
+          { "label": "Silver clean rows", "value": 46161, "max": 48214 },
+          { "label": "quarantined (recoverable)", "value": 847, "max": 48214, "hot": true },
+          { "label": "duplicates removed", "value": 1206, "max": 48214 }
+        ],
+        "note": "Silver contract: typed · deduped · one row per event · bad rows quarantined, not vanished"
+      },
+      "metrics": { "silver_rows": 46161, "quarantined_rows": 847, "reconciles": 48214 }
+    },
+    {
+      "t": 21,
+      "narration": "<strong>Gold = the showroom: arranged for the customer, not the warehouse.</strong> The <code>order_funnel_daily</code> mart aggregates the 46,161 clean events into a handful of business rows — one per funnel stage. It joins nothing raw and exposes no nulls: the business asks &ldquo;how many orders reached checkout yesterday?&rdquo;, not &ldquo;what's the union schema of the Bronze table?&rdquo;",
+      "state": {
+        "bars": [
+          { "label": "cart_add", "value": 9840, "max": 9840 },
+          { "label": "checkout_start", "value": 7612, "max": 9840 },
+          { "label": "payment_submitted", "value": 6301, "max": 9840 },
+          { "label": "fraud_check", "value": 6120, "max": 9840, "hot": true }
+        ],
+        "note": "Gold mart <code>order_funnel_daily</code>: 46,161 events → 4 aggregated funnel rows, business-shaped"
+      },
+      "metrics": { "gold_mart_rows": 4, "orders_in_funnel": 9840, "reached_fraud_check": 6120 }
+    },
+    {
+      "t": 24,
+      "narration": "The Gold slice the fraud team actually opens: of the 6,120 orders that hit a <code>fraud_check</code> event and got scored, <strong>431 landed at or above <code>FRAUD_REVIEW_THRESHOLD</code></strong> and flow into the human review queue. That single number is a business fact — no drift, no quarantine, no casting to reason about. Everything ugly was handled two layers down.",
+      "state": {
+        "bars": [
+          { "label": "scored at fraud_check", "value": 6120, "max": 6120 },
+          { "label": "review queue (>= FRAUD_REVIEW_THRESHOLD)", "value": 431, "max": 6120, "hot": true }
+        ],
+        "note": "Gold serves decisions: <code>fraud_review_queue</code> = 431 orders · the constant is applied once, here, on clean data"
+      },
+      "metrics": { "review_queue": 431, "scored_orders": 6120 }
+    },
+    {
+      "t": 27,
+      "narration": "The whole journey, and the rule that governs it: <strong>each layer has a contract, and violations flow downstream, never up.</strong> Raw drift and duplicates are legal in Bronze and illegal in Gold; a business aggregate is legal in Gold and forbidden in Bronze. Put a <code>dropDuplicates</code> in Bronze and you have lied about the source; put a raw null <code>order_id</code> in a Gold mart and you have handed the ugliness to the CFO's dashboard.",
+      "state": {
+        "note": "Bronze: append-all, reject-nothing (48,214) → Silver: typed, deduped, quarantined (46,161 + 847 held) → Gold: joined, aggregated, decision-ready (431 in review). Contracts point one direction: down."
+      },
+      "metrics": { "bronze_rows": 48214, "silver_rows": 46161, "gold_review_queue": 431 }
+    }
+  ]
+}

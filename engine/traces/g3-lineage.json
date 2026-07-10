@@ -1,0 +1,130 @@
+{
+  "id": "g3-lineage",
+  "title": "Where did the 43 come from — and is it still fresh?",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "14:20. A risk analyst pings the on-call: <em>\"The exec dashboard says <strong>43 orders in the fraud-review queue</strong>. Where does that number actually come from? I need to defend it in the compliance review at 15:00.\"</em> There is no good answer from memory — only from lineage. We walk the number backward, one hop at a time.",
+      "state": {
+        "note": "the question every data engineer eventually gets paged for: <code>where did this number come from?</code> — answered by <strong>lineage</strong>, not by guessing"
+      },
+      "metrics": { "queue_value": 43 }
+    },
+    {
+      "t": 3,
+      "narration": "Hop 1 — the <strong>Gold</strong> layer. The dashboard reads one cell of <code>gold.fraud_review_queue</code>, a mart with exactly <strong>43 rows</strong>. Its catalog entry names one upstream input: <code>silver.orders_scored</code>, and one transform: <code>WHERE fraud_score &gt;= FRAUD_REVIEW_THRESHOLD</code>. The 0.80 rule is not folklore; it is a recorded edge in the lineage graph.",
+      "state": {
+        "bars": [
+          { "label": "gold.fraud_review_queue (rows)", "value": 43, "max": 240, "unit": "rows", "hot": true }
+        ],
+        "note": "Gold ← <code>silver.orders_scored</code> via <code>filter(fraud_score &gt;= FRAUD_REVIEW_THRESHOLD)</code> — one node, one edge, one predicate"
+      },
+      "metrics": { "gold_rows": 43, "threshold": 0.8 }
+    },
+    {
+      "t": 6,
+      "narration": "Hop 2 — the <strong>Silver</strong> layer. <code>silver.orders_scored</code> holds <strong>225 rows</strong>: every order that carries a fraud score. It is an <code>INNER JOIN</code> of two Bronze tables on <code>order_id</code>. The filter drops it 225 → 43; the join is where the row count was already set. To explain 43 we first have to explain 225.",
+      "state": {
+        "bars": [
+          { "label": "silver.orders_scored (rows)", "value": 225, "max": 240, "unit": "rows", "hot": true },
+          { "label": "gold.fraud_review_queue (rows)", "value": 43, "max": 240, "unit": "rows" }
+        ],
+        "note": "Silver ← <code>bronze.orders</code> ⋈ <code>bronze.fraud_scores</code> on <code>order_id</code> (inner join)"
+      },
+      "metrics": { "silver_rows": 225, "gold_rows": 43 }
+    },
+    {
+      "t": 9,
+      "narration": "Hop 3 — the <strong>Bronze</strong> sources, the leaves of the graph. <code>bronze.orders</code> has <strong>240</strong> rows; <code>bronze.fraud_scores</code> has <strong>225</strong>. The inner join keeps only matches, so the <strong>15 unscored orders</strong> (240 − 225) never reach Silver. That gap is not a bug — it is a documented lineage fact, and it is exactly why the queue can never exceed 225.",
+      "state": {
+        "bars": [
+          { "label": "bronze.orders (rows)", "value": 240, "max": 240 },
+          { "label": "bronze.fraud_scores (rows)", "value": 225, "max": 240 },
+          { "label": "→ 15 unscored, dropped by inner join", "value": 15, "max": 240, "unit": "rows", "hot": true }
+        ],
+        "note": "leaves of the lineage graph: two raw tables from the ingestion layer — nothing upstream of them"
+      },
+      "metrics": { "orders": 240, "fraud_scores": 225, "unscored": 15 }
+    },
+    {
+      "t": 12,
+      "narration": "The full chain, read bottom-up: <code>orders (240)</code> + <code>fraud_scores (225)</code> → inner join → <code>orders_scored (225)</code> → filter <code>&gt;= FRAUD_REVIEW_THRESHOLD</code> → <code>fraud_review_queue (43)</code>. Column-level lineage adds the detail that matters in the compliance room: <strong>4 of the 43</strong> sit exactly at 0.80, kept only because the predicate is inclusive (<code>&gt;=</code>, not <code>&gt;</code>). Swap that operator and the number becomes 39.",
+      "state": {
+        "note": "answer to the 14:20 page: <code>240 → ⋈ → 225 → filter(&gt;= FRAUD_REVIEW_THRESHOLD) → 43</code>, and 4 rows ride the inclusive boundary",
+        "bars": [
+          { "label": "rows at fraud_score >= 0.80 (FRAUD_REVIEW_THRESHOLD)", "value": 43, "max": 43 },
+          { "label": "rows at fraud_score > 0.80 (strict — the bug)", "value": 39, "max": 43, "hot": true }
+        ]
+      },
+      "metrics": { "inclusive": 43, "strict": 39, "on_boundary": 4 }
+    },
+    {
+      "t": 15,
+      "narration": "Lineage answered <em>where</em>. Observability has a second question the analyst hasn't asked yet: <em>is the number still true right now?</em> A correct value computed over <strong>stale inputs</strong> is still wrong. Every table in the catalog carries a <strong>freshness SLO</strong> — a promise about how old its data may be before a consumer should stop trusting it.",
+      "state": {
+        "note": "freshness SLO: <code>gold.delivery_sla</code> must be built from courier data no more than <strong>60 min</strong> behind event time",
+        "bars": [
+          { "label": "freshness SLO budget", "value": 60, "max": 140, "unit": "min" }
+        ]
+      },
+      "metrics": { "slo_min": 60 }
+    },
+    {
+      "t": 18,
+      "narration": "17:05. The delivery-SLA tile on the same dashboard is fed by <code>bronze.courier_pings</code> — event-time data, where <code>ingested_at</code> lags <code>event_ts</code>. Most pings land within a few minutes. But tonight a batch of couriers went through a dead-zone, and their pings arrive with <code>ingested_at</code> up to <strong>95–130 minutes</strong> after the event actually happened.",
+      "state": {
+        "bars": [
+          { "label": "typical ping lag", "value": 4, "max": 140, "unit": "min" },
+          { "label": "late batch lag", "value": 95, "max": 140, "unit": "min", "hot": true },
+          { "label": "worst ping lag tonight", "value": 130, "max": 140, "unit": "min", "hot": true }
+        ],
+        "note": "late-arriving data: <code>ingested_at − event_ts</code> blows past the 60-min freshness budget for a slice of <code>courier_pings</code>"
+      },
+      "metrics": { "typical_lag_min": 4, "late_lag_min": 95, "worst_lag_min": 130 }
+    },
+    {
+      "t": 21,
+      "narration": "The freshness monitor computes lag as <code>now − max(event_ts seen)</code> for the partition feeding <code>gold.delivery_sla</code>. It crosses <strong>60 minutes at 17:05 and keeps climbing</strong>. The mart itself looks healthy — rows present, job green — but its <em>newest</em> event is now over an hour old. The dashboard is confidently showing yesterday's delivery picture.",
+      "state": {
+        "bars": [
+          { "label": "measured freshness lag", "value": 95, "max": 140, "unit": "min", "hot": true },
+          { "label": "freshness SLO (60 min)", "value": 60, "max": 140, "unit": "min" }
+        ],
+        "note": "SLO breach: <strong>95 min &gt; 60 min</strong> — the metric is stale even though every job succeeded"
+      },
+      "metrics": { "measured_lag_min": 95, "slo_min": 60, "breach_min": 35 }
+    },
+    {
+      "t": 24,
+      "narration": "The alert fires — and because the catalog carries lineage, it fires with a <strong>blast radius</strong>, not just a red dot. It names every downstream node that inherits the staleness: <code>gold.delivery_sla</code>, the two dashboard tiles built on it, and the daily ops digest email. Crucially it also names what is <em>not</em> affected: <code>fraud_review_queue</code> has no <code>courier_pings</code> ancestor, so the 43 is stale-proof here.",
+      "state": {
+        "note": "alert = <code>freshness_breach(gold.delivery_sla, lag=95min, slo=60min)</code> → downstream: 2 dashboard tiles + ops digest · <strong>fraud_review_queue unaffected</strong> (no shared ancestor)",
+        "bars": [
+          { "label": "downstream nodes marked stale", "value": 4, "max": 8, "unit": "nodes", "hot": true }
+        ]
+      },
+      "metrics": { "stale_downstream": 4, "measured_lag_min": 95 }
+    },
+    {
+      "t": 27,
+      "narration": "Triage is now mechanical instead of archaeological. Lineage points straight at the leaf — <code>courier_pings</code>, the dead-zone batch — so nobody re-derives the pipeline by reading code at 17:30. The fix is a watermark: hold <code>delivery_sla</code> from publishing until late data settles, or mark the tile <code>STALE</code> until lag drops back under the 60-min SLO. Either way the dashboard stops lying.",
+      "state": {
+        "bars": [
+          { "label": "freshness lag after watermark hold", "value": 12, "max": 140, "unit": "min" },
+          { "label": "freshness SLO (60 min)", "value": 60, "max": 140, "unit": "min" }
+        ],
+        "note": "resolution: watermark + <code>STALE</code> badge gated on the freshness SLO — recover to 12 min, back inside budget"
+      },
+      "metrics": { "recovered_lag_min": 12, "slo_min": 60 }
+    },
+    {
+      "t": 30,
+      "narration": "Two questions, two disciplines, one catalog. <strong>Lineage</strong> answered <em>where did 43 come from</em> — a graph you traverse, not a memory you trust: <code>240 → 225 → 43</code>, with 4 rows on the 0.80 boundary. <strong>Freshness SLOs</strong> answered <em>is it still true</em> — a clock on every table, with an alert that already knows its own blast radius. A number you can neither trace nor date is a number you cannot defend.",
+      "state": {
+        "note": "the observable pipeline: every metric has a <strong>lineage graph</strong> (where it came from) and a <strong>freshness clock</strong> (how old it is) — both recorded, both queryable, neither guessed"
+      },
+      "metrics": { "queue_value": 43, "slo_min": 60 }
+    }
+  ]
+}

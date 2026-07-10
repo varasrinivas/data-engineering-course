@@ -1,0 +1,106 @@
+{
+  "id": "a4-small-files",
+  "title": "The small-files tax: 12,000 × 14 KB",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "22:00. The courier-pings stream commits a micro-batch into <code>events/ds=2026-07-08/</code> every 30 seconds. Each commit writes one Parquet file per partition — tonight that means one ~14 KB file every half minute, all evening, every evening.",
+      "state": {
+        "files": { "count": 400, "avgKb": 14 },
+        "note": "streaming sink: <code>trigger(processingTime='30 seconds')</code> → one tiny file per micro-batch"
+      },
+      "metrics": { "files": 400, "avg_kb": 14 }
+    },
+    {
+      "t": 3,
+      "narration": "23:30. Nothing is <em>failing</em> — every write succeeds, checkpoints advance, dashboards are green. The directory is quietly filling with confetti. Nobody gets paged for file counts.",
+      "state": {
+        "files": { "count": 2400, "avgKb": 14 }
+      },
+      "metrics": { "files": 2400, "total_mb": 34 }
+    },
+    {
+      "t": 6,
+      "narration": "01:00. 7,200 files. For contrast: HDFS block size is 128 MB and the healthy Parquet target is 96–128 MB per file. These are <strong>0.01%</strong> of that — each one still costs a full metadata entry, a full open, a full footer read.",
+      "state": {
+        "files": { "count": 7200, "avgKb": 14 }
+      },
+      "metrics": { "files": 7200, "total_mb": 101 }
+    },
+    {
+      "t": 9,
+      "narration": "Midnight closes the partition: <strong>12,000 files, 14 KB average — 168 MB for the whole day</strong>. The entire day's data would fit in two properly-sized Parquet files. It is stored as twelve thousand.",
+      "state": {
+        "files": { "count": 12000, "avgKb": 14 },
+        "note": "168 MB of data · 12,000 objects — a 6,000× file-count overshoot"
+      },
+      "metrics": { "files": 12000, "total_mb": 168, "healthy_file_count": 2 }
+    },
+    {
+      "t": 12,
+      "narration": "02:00 — the nightly batch reads the partition, and the cost inverts: the object store LISTs 1,000 keys per call (12 round-trips), then issues <strong>one footer GET per file</strong> — 12,000 metadata reads before a single row is parsed. Listing and planning take 38s; moving the actual 168 MB takes 4s.",
+      "state": {
+        "bars": [
+          { "label": "list + plan files", "value": 38, "max": 42, "unit": "s", "hot": true },
+          { "label": "read bytes (168 MB)", "value": 4, "max": 42, "unit": "s" }
+        ]
+      },
+      "metrics": { "list_s": 38, "read_s": 4, "footer_gets": 12000 }
+    },
+    {
+      "t": 15,
+      "narration": "Then the scheduler drowns: one task per file means <strong>12,000 tasks for 168 MB</strong>. Median task: ~4 ms of real decode work wrapped in ~120 ms of scheduling, launch, and commit overhead. The executors churn through slivers — watch the bars: none of them is doing meaningful work.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 7, "label": "t-2,113" }, { "pct": 4, "label": "t-2,114" }, { "pct": 9, "label": "t-2,115" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 5, "label": "t-2,890" }, { "pct": 8, "label": "t-2,891" }, { "pct": 3, "label": "t-2,892" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 6, "label": "t-3,404" }, { "pct": 4, "label": "t-3,405" }, { "pct": 7, "label": "t-3,406" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 8, "label": "t-4,001" }, { "pct": 5, "label": "t-4,002" }, { "pct": 6, "label": "t-4,003" } ] }
+        ]
+      },
+      "metrics": { "tasks": 12000, "median_task_ms": 4, "overhead_pct": 97 }
+    },
+    {
+      "t": 18,
+      "narration": "Totals for the read: <strong>42s wall clock, of which 1.3s is compute</strong>. The driver alone burned 21s dispatching and tracking 12,000 task records. This tax is charged again on <em>every</em> read of this partition, forever, until someone compacts it.",
+      "state": {
+        "bars": [
+          { "label": "scheduler + overhead", "value": 21, "max": 42, "unit": "s", "hot": true },
+          { "label": "metadata (list/footers)", "value": 19.7, "max": 42, "unit": "s", "hot": true },
+          { "label": "actual decode", "value": 1.3, "max": 42, "unit": "s" }
+        ]
+      },
+      "metrics": { "wall_clock_s": 42, "compute_s": 1.3 }
+    },
+    {
+      "t": 21,
+      "narration": "The fix is a <strong>compaction job</strong>: read the closed partition, rewrite it at a 96 MB target (<code>OPTIMIZE</code> in Delta, or a plain <code>coalesce</code>-and-rewrite). This 168 MB day collapses to 2 files; across the nightly job's 7-day read window, 84,000 shards become <strong>12 right-sized files</strong>.",
+      "state": {
+        "files": { "count": 12, "avgKb": 98304 },
+        "note": "compaction: rewrite closed partitions to 96 MB targets — run it right after the partition closes"
+      },
+      "metrics": { "files_after": 12, "target_mb": 96 }
+    },
+    {
+      "t": 24,
+      "narration": "Re-run the read: listing is one page, footers are 12 GETs, and the scheduler hands out 12 fat tasks that stream real bytes. <strong>42s → 6s</strong>, and almost all of it is now honest I/O.",
+      "state": {
+        "bars": [
+          { "label": "list + plan files", "value": 0.3, "max": 42, "unit": "s" },
+          { "label": "read bytes", "value": 5.7, "max": 42, "unit": "s" },
+          { "label": "yesterday's read", "value": 42, "max": 42, "unit": "s", "hot": true }
+        ]
+      },
+      "metrics": { "read_s": 6, "before_s": 42, "tasks": 12 }
+    },
+    {
+      "t": 27,
+      "narration": "The senior move is to stop <em>creating</em> the problem: widen the streaming trigger (30s → 5 min cuts file count 10×), set per-partition file-size targets, and schedule auto-compaction on partition close. Small files are a tax collected on every read — you either pay it nightly or cancel it at the source.",
+      "state": {
+        "note": "write-side: <code>trigger(processingTime='5 minutes')</code> + auto-compaction on partition close<br>read-side: <code>OPTIMIZE</code> / rewrite to 96–128 MB before heavy consumers run"
+      },
+      "metrics": { "files_per_day_after": 288, "read_s": 6 }
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "id": "f4-cicd-pipeline",
+  "title": "The gate that caught a renamed column before prod did",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "10:42. A commit lands on <code>main</code>: <code>a1c9f04</code> — \"silver_orders: tidy column names\". It renames <code>fraud_score</code> to <code>risk_score</code> in the silver transform, and updates the one unit-test fixture to match. CI fires the pipeline: <strong>lint → unit → integration → data-quality gate → deploy(staging)</strong>. Each stage is a required check; a red stage blocks promotion.",
+      "state": {
+        "bars": [
+          { "label": "lint (ruff + black)", "value": 0, "max": 240, "unit": "s" }
+        ],
+        "note": "commit a1c9f04 · branch main · pipeline queued · deploy target = staging (prod is gated behind staging)"
+      },
+      "metrics": { "stages_total": 5, "stages_passed": 0 }
+    },
+    {
+      "t": 3,
+      "narration": "Stage 1 — <strong>lint</strong>. <code>ruff</code> and <code>black --check</code> run in 11 seconds across 42 files: style, unused imports, formatting. The rename is perfectly well-formatted Python, so lint has nothing to say. Green. This is the cheapest gate and it only ever catches surface problems — it was never going to catch this one.",
+      "state": {
+        "bars": [
+          { "label": "lint (ruff + black)", "value": 11, "max": 240, "unit": "s" }
+        ],
+        "note": "42 files clean · 0 findings — lint validates form, not behavior"
+      },
+      "metrics": { "stages_passed": 1, "lint_s": 11, "files_linted": 42 }
+    },
+    {
+      "t": 7,
+      "narration": "Stage 2 — <strong>unit tests</strong> with chispa-style DataFrame assertions. 47 tests build tiny in-memory DataFrames and compare them with <code>assert_df_equality</code>. They pass in 38 seconds — <em>including</em> the fraud-queue test, because the same commit updated that fixture to say <code>risk_score</code>. The test and the code agree with each other. They just no longer agree with the rest of the platform.",
+      "state": {
+        "bars": [
+          { "label": "lint (ruff + black)", "value": 11, "max": 240, "unit": "s" },
+          { "label": "unit (47 chispa asserts)", "value": 38, "max": 240, "unit": "s" }
+        ],
+        "note": "47 passed, 0 failed — a green unit suite proves internal consistency, not contract compliance"
+      },
+      "metrics": { "stages_passed": 2, "unit_tests": 47, "unit_failures": 0, "unit_s": 38 }
+    },
+    {
+      "t": 11,
+      "narration": "Stage 3 — <strong>integration on a golden sample</strong>. The real pipeline runs end-to-end against a frozen 240-order NimbusMart fixture (seed 42), writing Silver and Gold to a scratch namespace. It completes in 96 seconds with a zero exit code. No exception is thrown: renaming a column is a perfectly successful operation. The job is green and the output is wrong.",
+      "state": {
+        "bars": [
+          { "label": "lint (ruff + black)", "value": 11, "max": 240, "unit": "s" },
+          { "label": "unit (47 chispa asserts)", "value": 38, "max": 240, "unit": "s" },
+          { "label": "integration (240-order sample)", "value": 96, "max": 240, "unit": "s" }
+        ],
+        "note": "exit 0 · Silver + Gold written to scratch · no crash — 'it ran' is not 'it is correct'"
+      },
+      "metrics": { "stages_passed": 3, "integration_s": 96, "sample_orders": 240 }
+    },
+    {
+      "t": 15,
+      "narration": "Stage 4 — the <strong>data-quality gate</strong>. It does not run the code; it inspects the code's <em>output</em> against a contract. Two checks matter here: a <strong>schema contract</strong> (the Gold <code>fraud_review_queue</code> must expose exactly these columns and types) and a <strong>row expectation</strong> (on the golden sample, exactly 43 orders sit at or above FRAUD_REVIEW_THRESHOLD). It starts evaluating both.",
+      "state": {
+        "bars": [
+          { "label": "integration (240-order sample)", "value": 96, "max": 240, "unit": "s" },
+          { "label": "data-quality gate", "value": 4, "max": 30, "unit": "s", "hot": true }
+        ],
+        "note": "gate = declared expectations on output: schema contract + row-count bounds + null/uniqueness rules"
+      },
+      "metrics": { "stages_passed": 3, "gate_checks": 2 }
+    },
+    {
+      "t": 19,
+      "narration": "<strong>The gate fails.</strong> The schema-contract check reports: <code>fraud_review_queue</code> is missing required column <code>fraud_score</code>; found unexpected column <code>risk_score</code>. And the row expectation collapsed — the downstream join keys on <code>fraud_score</code>, which no longer exists, so the queue came out with <strong>0 rows instead of 43</strong>. Two red assertions, 9 seconds in.",
+      "state": {
+        "bars": [
+          { "label": "schema contract: fraud_score MISSING", "value": 30, "max": 30, "unit": "s", "hot": true },
+          { "label": "expect 43 in review queue — got 0", "value": 30, "max": 30, "unit": "s", "hot": true }
+        ],
+        "note": "FAIL · required column <code>fraud_score</code> absent (renamed to <code>risk_score</code>) · review-queue rows 0 ≠ 43"
+      },
+      "metrics": { "stages_passed": 3, "gate_failures": 2, "review_rows_got": 0, "review_rows_expected": 43 }
+    },
+    {
+      "t": 23,
+      "narration": "Promotion is <strong>blocked</strong>. The deploy stage never starts — a required check is red, so the commit cannot reach staging, let alone prod. CI posts the failure back on the commit with the two failing expectations. The author sees it in ~90 seconds of pushing, at their desk, with full context — the cheapest possible place to learn the column is load-bearing.",
+      "state": {
+        "bars": [
+          { "label": "data-quality gate", "value": 30, "max": 30, "unit": "s", "hot": true },
+          { "label": "deploy(staging)", "value": 0, "max": 30, "unit": "s" }
+        ],
+        "note": "deploy skipped — upstream required check failed · commit a1c9f04 marked not-promotable"
+      },
+      "metrics": { "stages_passed": 3, "deploy_started": 0, "feedback_latency_s": 90 }
+    },
+    {
+      "t": 27,
+      "narration": "Play the counterfactual — no data-quality gate. Lint, unit, and integration were all green, so the commit ships to staging and, on the next promotion, to <strong>prod</strong>. Tonight's nightly DAG runs the fraud-review task: it produces 0 flagged orders. Every fraudulent order at or above FRAUD_REVIEW_THRESHOLD auto-fulfills. Nobody is paged, because nothing <em>failed</em> — the queue is simply, silently empty.",
+      "state": {
+        "bars": [
+          { "label": "orders flagged for review (with gate)", "value": 43, "max": 43 },
+          { "label": "orders flagged for review (no gate, in prod)", "value": 0, "max": 43, "hot": true }
+        ],
+        "note": "a green pipeline with no output contract ships correctness bugs straight to prod — silently"
+      },
+      "metrics": { "flagged_with_gate": 43, "flagged_without_gate": 0 }
+    },
+    {
+      "t": 31,
+      "narration": "The fix is a two-line diff: keep the column name <code>fraud_score</code> (or update every downstream consumer <em>and</em> the schema contract in the same PR). Re-push as <code>b0e7712</code>. The pipeline reruns: lint 11s, unit 38s, integration 95s, gate green — 43 rows, schema matches. Deploy to staging proceeds. Same five stages, one honest green.",
+      "state": {
+        "bars": [
+          { "label": "lint", "value": 11, "max": 240, "unit": "s" },
+          { "label": "unit (47 chispa asserts)", "value": 38, "max": 240, "unit": "s" },
+          { "label": "integration (240-order sample)", "value": 95, "max": 240, "unit": "s" },
+          { "label": "data-quality gate", "value": 8, "max": 240, "unit": "s" },
+          { "label": "deploy(staging)", "value": 22, "max": 240, "unit": "s" }
+        ],
+        "note": "commit b0e7712 · all 5 stages green · review queue = 43 rows · promoted to staging"
+      },
+      "metrics": { "stages_passed": 5, "review_queue_rows": 43, "deploy_s": 22 }
+    },
+    {
+      "t": 35,
+      "narration": "The lesson is where the layers stop each other. Lint guards form; unit tests guard internal logic; integration guards that it runs; only the <strong>data-quality gate guards that the output still means what consumers depend on</strong>. Unit tests moved with the bug — the gate could not, because it is pinned to the contract, not to the code. Gate your pipelines on their <em>output</em>, in dev-then-staging-then-prod, and prod stops being where you discover the column mattered.",
+      "state": {
+        "note": "the CI/CD ladder for data: lint → unit(chispa) → integration(sample) → data-quality gate → promote<br>tests can drift with the code; a contract-pinned gate is what catches the change the tests were edited to allow"
+      },
+      "metrics": { "stages_total": 5, "envs": 3, "review_queue_rows": 43 }
+    }
+  ]
+}

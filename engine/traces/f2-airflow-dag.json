@@ -1,0 +1,120 @@
+{
+  "id": "f2-airflow-dag",
+  "title": "The nightly clipboard: one DAG, one sick task, one retry",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "02:00. The scheduler fires <code>nimbusmart_nightly</code> for <code>execution_date=2026-07-08</code>. Nothing runs yet — the DAG's first task is a <strong>sensor</strong>, <code>wait_for_orders_export</code>, poking S3 every 60s for the OLTP team's <code>_SUCCESS</code> flag. Airflow is the shift supervisor reading the clipboard: nobody picks up a task before its upstream box is ticked.",
+      "state": {
+        "bars": [
+          { "label": "wait_for_orders_export (sensor)", "value": 1, "max": 15, "unit": "min", "hot": true }
+        ],
+        "note": "sensor mode=<code>reschedule</code>: it frees its worker slot between pokes instead of blocking one for the whole wait"
+      },
+      "metrics": { "tasks_total": 6, "tasks_done": 0, "poke_interval_s": 60 }
+    },
+    {
+      "t": 4,
+      "narration": "02:07. Still poking. The orders export was due at 02:00 but the source OLTP snapshot is running long tonight. The sensor is not failing — it is <em>waiting</em>, exactly as designed. Its timeout is 45 minutes; we are 7 minutes in. Every downstream task stays in <code>none</code>/<code>scheduled</code> state, held behind this one tick.",
+      "state": {
+        "bars": [
+          { "label": "wait_for_orders_export (sensor)", "value": 7, "max": 15, "unit": "min", "hot": true }
+        ],
+        "note": "downstream held: ingest, silver, fraud queue, gold — all blocked on one unticked box"
+      },
+      "metrics": { "tasks_done": 0, "sensor_elapsed_min": 7, "sensor_timeout_min": 45 }
+    },
+    {
+      "t": 8,
+      "narration": "02:14. The <code>_SUCCESS</code> flag lands; the sensor clears on its next poke and marks itself <code>success</code>. Fourteen minutes of the night spent purely waiting — and that is the good outcome. The alternative, hard-coding a <code>sleep(15m)</code>, would break the first night the export ran fast <em>or</em> slow.",
+      "state": {
+        "bars": [
+          { "label": "wait_for_orders_export (sensor)", "value": 14, "max": 15, "unit": "min" }
+        ],
+        "note": "sensor succeeded at 02:14 — the export was 14 min late; the DAG absorbed it without a page"
+      },
+      "metrics": { "tasks_done": 1, "sensor_waited_min": 14 }
+    },
+    {
+      "t": 12,
+      "narration": "Two <code>ingest</code> tasks fan out in parallel — they share no dependency, so the scheduler dispatches both the instant the sensor clears. <code>ingest_orders_bronze</code> lands 240 orders; <code>ingest_fraud_scores_bronze</code> lands 225 scores. This is the clipboard's real value: it knows which jobs can run at once and which must queue.",
+      "state": {
+        "bars": [
+          { "label": "ingest_orders_bronze", "value": 3.2, "max": 8, "unit": "min" },
+          { "label": "ingest_fraud_scores_bronze", "value": 1.1, "max": 8, "unit": "min" }
+        ],
+        "note": "PythonOperator ×2, no edge between them → parallel; both write to the Bronze receiving dock"
+      },
+      "metrics": { "tasks_done": 3, "orders_ingested": 240, "scores_ingested": 225 }
+    },
+    {
+      "t": 16,
+      "narration": "<code>build_silver_orders</code> depends on the orders ingest, so it starts only after that box is ticked — dependency order, not clock order. It standardizes types and drops the two malformed rows into quarantine. 6.5 minutes. Downstream, <code>build_fraud_review_queue</code> waits on both silver orders <em>and</em> the fraud ingest.",
+      "state": {
+        "bars": [
+          { "label": "ingest_orders_bronze", "value": 3.2, "max": 8, "unit": "min" },
+          { "label": "ingest_fraud_scores_bronze", "value": 1.1, "max": 8, "unit": "min" },
+          { "label": "build_silver_orders", "value": 6.5, "max": 8, "unit": "min" }
+        ],
+        "note": "edge: ingest_orders_bronze → build_silver_orders; the QC station runs only after the dock signs off"
+      },
+      "metrics": { "tasks_done": 4, "quarantined_rows": 2 }
+    },
+    {
+      "t": 20,
+      "narration": "02:27. <code>build_fraud_review_queue</code> starts — the task that flags every order at or above <code>FRAUD_REVIEW_THRESHOLD</code> (0.80). Two minutes in, its executor is lost: a spot node reclaim kills the JVM mid-shuffle. The task fails. This is the supervisor's 'someone called in sick' moment.",
+      "state": {
+        "bars": [
+          { "label": "build_silver_orders", "value": 6.5, "max": 8, "unit": "min" },
+          { "label": "build_fraud_review_queue — try 1 (FAILED)", "value": 2.1, "max": 8, "unit": "min", "hot": true }
+        ],
+        "note": "ExecutorLostFailure at 02:29 — transient infra, not a code bug; the task record flips to <code>up_for_retry</code>"
+      },
+      "metrics": { "tasks_done": 4, "try_number": 1, "retries_configured": 2 }
+    },
+    {
+      "t": 24,
+      "narration": "The DAG does not collapse. <code>build_fraud_review_queue</code> is configured with <code>retries=2</code> and <code>retry_delay=2m</code> (exponential backoff). Airflow waits out the delay, then re-dispatches the <em>same</em> task instance with an incremented try number. Because the task is idempotent — it overwrites its output partition — a retry is safe to run from scratch.",
+      "state": {
+        "bars": [
+          { "label": "build_fraud_review_queue — retry backoff", "value": 2, "max": 8, "unit": "min", "hot": true }
+        ],
+        "note": "held downstream: <code>refresh_gold_dashboard</code> stays <code>scheduled</code> until this task reaches <code>success</code>"
+      },
+      "metrics": { "tasks_done": 4, "try_number": 2, "retry_delay_min": 2 }
+    },
+    {
+      "t": 28,
+      "narration": "Try 2 gets a healthy executor and completes cleanly in 4.8 minutes: <strong>43 orders</strong> land in the review queue (4 of them exactly at 0.80). The task flips to <code>success</code>. One sick worker cost the DAG ~7 minutes of retry, not a failed night and not a 03:00 page.",
+      "state": {
+        "bars": [
+          { "label": "build_fraud_review_queue — try 1 (FAILED)", "value": 2.1, "max": 8, "unit": "min", "hot": true },
+          { "label": "build_fraud_review_queue — try 2 (OK)", "value": 4.8, "max": 8, "unit": "min" }
+        ],
+        "note": "review queue built: 43 orders ≥ FRAUD_REVIEW_THRESHOLD — same result the first try would have produced"
+      },
+      "metrics": { "tasks_done": 5, "review_queue_rows": 43, "retry_cost_min": 7 }
+    },
+    {
+      "t": 32,
+      "narration": "With its last upstream box finally ticked, <code>refresh_gold_dashboard</code> releases and runs — 2.7 minutes to rebuild the executive mart. The whole DAG reaches <code>success</code> at 02:35. Total wall clock: 35 minutes, of which 14 was the sensor waiting and 7 was the retry — only 14 was actual compute.",
+      "state": {
+        "bars": [
+          { "label": "build_fraud_review_queue — try 2 (OK)", "value": 4.8, "max": 8, "unit": "min" },
+          { "label": "refresh_gold_dashboard", "value": 2.7, "max": 8, "unit": "min" }
+        ],
+        "note": "DAG state = success · execution_date=2026-07-08 · all 6 tasks green"
+      },
+      "metrics": { "tasks_done": 6, "wall_clock_min": 35, "compute_min": 14 }
+    },
+    {
+      "t": 36,
+      "narration": "The clipboard's whole job, in one sentence: <strong>encode the dependencies once, and every night the DAG picks the right order, runs what it can in parallel, waits on what is not ready, and retries what falls over</strong> — without a human awake to sequence it. You describe the work as a graph; Airflow runs the shift.",
+      "state": {
+        "note": "the DAG contract: sensors gate on upstream readiness · edges encode order · retries absorb transient failure · idempotent tasks make retries free<br>you author the graph; the scheduler owns the night"
+      },
+      "metrics": { "tasks_total": 6, "sensors": 1, "retries_used": 1, "wall_clock_min": 35 }
+    }
+  ]
+}

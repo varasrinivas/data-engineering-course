@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://nimbusmart.example/engine/traces/schema.json",
+  "title": "NimbusMart scripted trace (Tier 3) — mirrors docs/04-ENGINE-CONTRACT.md section 4",
+  "type": "object",
+  "required": ["id", "title", "badge", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "title": { "type": "string", "minLength": 1 },
+    "badge": { "const": "simulation" },
+    "compare": { "type": "boolean" },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/step" }
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "required": ["narration", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "type": "number", "minimum": 0 },
+        "narration": { "type": "string", "minLength": 1 },
+        "state": {
+          "anyOf": [
+            { "$ref": "#/definitions/visualState" },
+            { "$ref": "#/definitions/compareState" }
+          ]
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        }
+      }
+    },
+    "compareState": {
+      "type": "object",
+      "required": ["before", "after"],
+      "additionalProperties": false,
+      "properties": {
+        "before": { "$ref": "#/definitions/visualState" },
+        "after": { "$ref": "#/definitions/visualState" }
+      }
+    },
+    "visualState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executors": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/executor" }
+        },
+        "partitions": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/partition" }
+        },
+        "bars": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/bar" }
+        },
+        "files": { "$ref": "#/definitions/files" },
+        "note": { "type": "string" }
+      }
+    },
+    "executor": {
+      "type": "object",
+      "required": ["tasks"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "tasks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/task" }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["pct"],
+      "additionalProperties": false,
+      "properties": {
+        "pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "hot": { "type": "boolean" },
+        "label": { "type": "string" }
+      }
+    },
+    "partition": {
+      "type": "object",
+      "required": ["size"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "size": { "type": "number", "minimum": 0 },
+        "hot": { "type": "boolean" }
+      }
+    },
+    "bar": {
+      "type": "object",
+      "required": ["label", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "value": { "type": "number", "minimum": 0 },
+        "max": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "type": "string" },
+        "hot": { "type": "boolean" }
+      }
+    },
+    "files": {
+      "type": "object",
+      "required": ["count"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "number", "minimum": 0 },
+        "avgKb": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

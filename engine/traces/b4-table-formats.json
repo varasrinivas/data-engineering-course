@@ -1,0 +1,115 @@
+{
+  "id": "b4-table-formats",
+  "title": "A Parquet directory grows a transaction log",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "Start with the honest truth about a &ldquo;table&rdquo; on object storage: it is a <strong>directory of Parquet files</strong> and nothing else. <code>orders/</code> holds 128 files, 96 MB each. Spark &ldquo;knows&rdquo; the table by <em>listing the directory</em> at read time. There is no table — there is a folder everyone agrees to call one.",
+      "state": {
+        "files": { "count": 128, "avgKb": 98304 },
+        "note": "plain Parquet &ldquo;table&rdquo; = <code>orders/*.parquet</code> · the file listing IS the schema of truth"
+      },
+      "metrics": { "files": 128, "table_size_gb": 12 }
+    },
+    {
+      "t": 3,
+      "narration": "Now two jobs write at once — the nightly compaction and an hourly append. Both add files; the append also means to replace three stale ones. On plain Parquet there is <strong>no referee</strong>. A reader that lists the directory <em>mid-write</em> sees a torn state: some new files present, some old ones already deleted, some not yet. Dirty reads, and no one committed anything, because there is no such thing as a commit here.",
+      "state": {
+        "bars": [
+          { "label": "writer A: files added", "value": 6, "max": 12 },
+          { "label": "writer B: files added", "value": 4, "max": 12 },
+          { "label": "reader sees (torn)", "value": 131, "max": 140, "hot": true }
+        ],
+        "note": "concurrent writers + directory listing = no atomicity, no isolation — the classic data-lake corruption"
+      },
+      "metrics": { "concurrent_writers": 2, "torn_read": 1 }
+    },
+    {
+      "t": 6,
+      "narration": "The fix is one idea borrowed wholesale from version control: <strong>put a transaction log next to the data.</strong> Add a <code>_delta_log/</code> (Delta) or <code>metadata/</code> (Iceberg) folder. From now on nobody reads the table by listing files — they read the log, and the log tells them <em>exactly which files</em> make up the table right now. Parquet files become immutable; the log becomes the source of truth. This is Git for Parquet.",
+      "state": {
+        "files": { "count": 128, "avgKb": 98304 },
+        "note": "<code>_delta_log/00000000000000000000.json</code> — the log lists the files; data files are now append-only &amp; immutable"
+      },
+      "metrics": { "version": 0, "files_in_snapshot": 128 }
+    },
+    {
+      "t": 9,
+      "narration": "<strong>Version 0</strong> is the first commit: a JSON entry that says &ldquo;the table is these 128 files.&rdquo; A version (Delta calls it a version, Iceberg a snapshot) is an immutable pointer to a specific set of files. Read the table and you are really reading <em>the file set named by the newest log entry</em> — a photograph, not a live folder.",
+      "state": {
+        "bars": [
+          { "label": "v0 · files in snapshot", "value": 128, "max": 160 }
+        ],
+        "note": "version 0 = { add: 128 files } · a snapshot is an immutable list of files, committed atomically"
+      },
+      "metrics": { "version": 0, "files_in_snapshot": 128 }
+    },
+    {
+      "t": 12,
+      "narration": "Writer A appends the new hour: it stages 6 new Parquet files, then commits <strong>version 1</strong> by appending a single log entry — <code>{ add: 6 new files, remove: 3 stale files }</code>. The commit is that one atomic append. Until that JSON file lands, every reader still sees v0's 128 files. The instant it lands, everyone sees v1's 131. There is no torn in-between.",
+      "state": {
+        "bars": [
+          { "label": "v0 · files", "value": 128, "max": 160 },
+          { "label": "v1 · files (6 add, 3 remove)", "value": 131, "max": 160, "hot": true }
+        ],
+        "note": "commit = one atomic log append (<code>...00001.json</code>) · data files were written first, made visible last"
+      },
+      "metrics": { "version": 1, "files_added": 6, "files_removed": 3, "files_in_snapshot": 131 }
+    },
+    {
+      "t": 15,
+      "narration": "Here is the concurrency case that melts plain Parquet. Writer A and Writer B <em>both</em> read v1 and both try to commit the next version. <strong>Optimistic concurrency:</strong> A wins the race to write <code>...00002.json</code>. B's commit fails the check &mdash; the log moved under it &mdash; so B does not corrupt anything; it re-reads v2, re-applies its changes on top, and commits <strong>version 3</strong>. Two writers, zero lost updates, zero locks held.",
+      "state": {
+        "bars": [
+          { "label": "writer A → commits v2", "value": 137, "max": 160, "hot": true },
+          { "label": "writer B → conflict, retries → v3", "value": 142, "max": 160, "hot": true }
+        ],
+        "note": "optimistic concurrency control: conflicting commit is rejected and retried on the new base — never merged blindly"
+      },
+      "metrics": { "version": 3, "write_conflicts_resolved": 1, "lost_updates": 0 }
+    },
+    {
+      "t": 18,
+      "narration": "And the property that makes long jobs safe: <strong>snapshot isolation.</strong> A 20-minute analytics read that <em>started</em> at v2 keeps reading v2's exact file set the whole time — even as writers commit v3, v4, v5 underneath it. The reader is pinned to a photograph. It never sees a half-written table, and it never needs a lock to get that guarantee.",
+      "state": {
+        "bars": [
+          { "label": "reader pinned → v2 (stable)", "value": 137, "max": 160 },
+          { "label": "writers advance → v5", "value": 149, "max": 160, "hot": true }
+        ],
+        "note": "reader on v2 sees v2's files start to finish · writers race ahead to v5 · immutable files = no reader/writer contention"
+      },
+      "metrics": { "reader_version": 2, "table_head_version": 5 }
+    },
+    {
+      "t": 21,
+      "narration": "Because every version is still described by its log entry, the past is queryable: <strong>time travel.</strong> <code>SELECT * FROM orders VERSION AS OF 2</code> replays the log up to entry 2 and reads exactly the files that were live then. <code>TIMESTAMP AS OF '2026-07-08'</code> does the same by wall-clock. This is <code>git checkout &lt;sha&gt;</code> for a 12 GB table — reproduce yesterday's dashboard, or diff v2 against v5 to see what a bad job changed.",
+      "state": {
+        "bars": [
+          { "label": "v0", "value": 128, "max": 160 },
+          { "label": "v2 (time-travel target)", "value": 137, "max": 160, "hot": true },
+          { "label": "v5 (current head)", "value": 149, "max": 160 }
+        ],
+        "note": "<code>VERSION AS OF 2</code> / <code>TIMESTAMP AS OF ...</code> — reconstruct any past snapshot by replaying log entries to N"
+      },
+      "metrics": { "versions_retained": 6, "time_travel_target": 2 }
+    },
+    {
+      "t": 24,
+      "narration": "Add it up and you have the four letters plain Parquet could never spell. <strong>Atomicity:</strong> a commit is one log append — all files or none. <strong>Consistency:</strong> the log carries the schema, so a bad-shaped write is rejected. <strong>Isolation:</strong> snapshot reads, no locks. <strong>Durability:</strong> immutable data files plus an append-only log. ACID transactions over object storage &mdash; that is the whole reason the lakehouse exists.",
+      "state": {
+        "note": "Delta / Iceberg / Hudi all do the same trick: <strong>immutable Parquet + an ordered transaction log</strong> = ACID on a bucket"
+      },
+      "metrics": { "acid_guarantees": 4, "table_head_version": 5 }
+    },
+    {
+      "t": 27,
+      "narration": "The tax, so no one is surprised later: the log and the old snapshots are not free. Every commit adds a file; time travel keeps old data files alive until you <code>VACUUM</code> (Delta) or expire snapshots (Iceberg). Run compaction on the log, set a retention window, and vacuum on a schedule &mdash; the same housekeeping a Git repo needs so its history does not swallow the disk. Snapshots are cheap to keep and not free to keep forever.",
+      "state": {
+        "files": { "count": 12, "avgKb": 98304 },
+        "note": "maintenance: <code>OPTIMIZE</code> the data · compact the log · <code>VACUUM</code> past the retention window (default 7 days) to reclaim superseded files"
+      },
+      "metrics": { "retention_days": 7, "files_after_vacuum": 12 }
+    }
+  ]
+}

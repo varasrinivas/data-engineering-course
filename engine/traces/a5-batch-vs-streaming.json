@@ -1,0 +1,109 @@
+{
+  "id": "a5-batch-vs-streaming",
+  "title": "One workload, three clocks: batch vs streaming vs micro-batch",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "The workload is fixed: NimbusMart's order-events stream feeds the fraud-review queue, and the only open question is <em>freshness</em> — how soon after an order is placed must it appear for a human reviewer? Same logic three ways. The freshness answer, not the code, picks the architecture.",
+      "state": {
+        "note": "workload: order-events → fraud-review queue · 24,000,000 events/day · the SLA knob is end-to-end latency"
+      },
+      "metrics": { "events_per_day_millions": 24 }
+    },
+    {
+      "t": 3,
+      "narration": "<strong>(a) Nightly batch.</strong> One job at 02:00 chews the whole day's 24M events in a single pass, cluster fully saturated, then shuts the cluster off. Throughput is enormous and the cost is tiny because the cluster only lives for ~25 minutes a day. The catch is latency: an order placed at 02:01 waits nearly 24 hours to be reviewed.",
+      "state": {
+        "bars": [
+          { "label": "throughput", "value": 16000, "max": 16000, "unit": "ev/s" },
+          { "label": "end-to-end latency", "value": 86400, "max": 86400, "unit": "s", "hot": true }
+        ],
+        "note": "batch: max throughput, min cost, worst latency — 24M events in 25 min, cluster up 0.4 h/day"
+      },
+      "metrics": { "throughput_ev_s": 16000, "latency_s": 86400, "cluster_hours_day": 0.4 }
+    },
+    {
+      "t": 6,
+      "narration": "Batch, priced out: 24M events in 25 minutes is ~16,000 events/s of effective throughput on a cluster that runs less than half an hour, so the daily compute bill is roughly <strong>$18</strong>. But a fraudulent order placed at 09:00 sits un-reviewed until tomorrow's 02:00 run — that's the blast radius you're accepting in exchange for the cheap, simple pipeline.",
+      "state": {
+        "bars": [
+          { "label": "cost / day", "value": 18, "max": 340, "unit": "$" },
+          { "label": "worst-case review delay", "value": 24, "max": 24, "unit": "h", "hot": true }
+        ],
+        "note": "the money is cheap; the delay is the price — fine for finance rollups, dangerous for live fraud"
+      },
+      "metrics": { "cost_day_usd": 18, "worst_delay_h": 24 }
+    },
+    {
+      "t": 9,
+      "narration": "<strong>(b) Real-time streaming.</strong> A continuously running job (Structured Streaming / Flink) processes events as they arrive: end-to-end p95 around <strong>3 seconds</strong>. But the cluster is always on, 24×7, and must be provisioned for the <em>peak</em> spike even though most hours are quiet — so throughput-per-dollar drops and cost jumps.",
+      "state": {
+        "bars": [
+          { "label": "throughput", "value": 6000, "max": 16000, "unit": "ev/s" },
+          { "label": "end-to-end latency", "value": 3, "max": 86400, "unit": "s" }
+        ],
+        "note": "streaming: best latency, lower throughput/$ (idle headroom for spikes), always-on"
+      },
+      "metrics": { "throughput_ev_s": 6000, "latency_s": 3, "cluster_hours_day": 24 }
+    },
+    {
+      "t": 12,
+      "narration": "Streaming, priced out: a cluster running 24 hours a day and sized for peak costs about <strong>$310/day</strong> — roughly 17× the batch bill for the same 24M events. You also buy operational weight: checkpoints, state stores, watermarks for late <code>courier_pings</code>, and 3 a.m. pages when the stream stalls. You pay all of that to turn 24 hours of latency into 3 seconds.",
+      "state": {
+        "bars": [
+          { "label": "cost / day", "value": 310, "max": 340, "unit": "$", "hot": true },
+          { "label": "worst-case review delay", "value": 0.001, "max": 24, "unit": "h" }
+        ],
+        "note": "seconds of latency, but ~17× the cost and a standing on-call surface — justified only when seconds change a decision"
+      },
+      "metrics": { "cost_day_usd": 310, "worst_delay_s": 3 }
+    },
+    {
+      "t": 15,
+      "narration": "<strong>(c) Micro-batch — the pragmatic middle.</strong> Structured Streaming with <code>trigger(processingTime='2 minutes')</code>: the same streaming API, but it accumulates two minutes of events and processes them as one small batch. Latency ~2 minutes, throughput back near batch levels (fat, efficient tasks), cost moderate because the cluster can scale down between triggers.",
+      "state": {
+        "bars": [
+          { "label": "throughput", "value": 14000, "max": 16000, "unit": "ev/s" },
+          { "label": "end-to-end latency", "value": 120, "max": 86400, "unit": "s" }
+        ],
+        "note": "micro-batch: batch-like throughput, 2-minute latency, one tunable trigger — the 90%-case default"
+      },
+      "metrics": { "throughput_ev_s": 14000, "latency_s": 120, "cluster_hours_day": 6 }
+    },
+    {
+      "t": 18,
+      "narration": "The three, side by side on latency — the axis the business actually feels. Micro-batch gives up sub-second freshness it doesn't need and lands at 2 minutes, which for a queue a <em>human</em> works is indistinguishable from real time. Nobody reviewing fraud can tell a 3-second queue from a 2-minute one; the finance team can't tell 2 minutes from last night.",
+      "state": {
+        "bars": [
+          { "label": "streaming", "value": 3, "max": 86400, "unit": "s" },
+          { "label": "micro-batch", "value": 120, "max": 86400, "unit": "s" },
+          { "label": "nightly batch", "value": 86400, "max": 86400, "unit": "s", "hot": true }
+        ],
+        "note": "latency spans 5 orders of magnitude — match it to the human or system consuming the output, not to the hype"
+      },
+      "metrics": { "stream_s": 3, "micro_s": 120, "batch_s": 86400 }
+    },
+    {
+      "t": 21,
+      "narration": "And the same three on cost, which points the opposite way. There is no free architecture: <strong>latency, throughput, and cost form a triangle and you get to pin two</strong>. Batch pins throughput+cost and surrenders latency; streaming pins latency+throughput and surrenders cost; micro-batch deliberately sits in the middle of all three.",
+      "state": {
+        "bars": [
+          { "label": "nightly batch", "value": 18, "max": 340, "unit": "$" },
+          { "label": "micro-batch", "value": 74, "max": 340, "unit": "$" },
+          { "label": "streaming", "value": 310, "max": 340, "unit": "$", "hot": true }
+        ],
+        "note": "the latency/throughput/cost triangle: cheaper freshness always bills somewhere — usually here"
+      },
+      "metrics": { "batch_usd": 18, "micro_usd": 74, "stream_usd": 310 }
+    },
+    {
+      "t": 24,
+      "narration": "The decision rule, not the trend chart: match latency to the need and take the cheapest thing that clears it. Nightly batch for finance roll-ups and the daily executive dashboard. Micro-batch for the fraud-review queue and most operational marts — the honest default. True streaming only where <em>seconds change a decision</em>: payment authorization, live inventory, security alerting. For NimbusMart's human-worked review queue, micro-batch wins on every axis that matters and loses on none that do.",
+      "state": {
+        "note": "batch = rollups · micro-batch = the 90% default (incl. this fraud queue) · streaming = seconds-matter systems only"
+      },
+      "metrics": { "batch_usd": 18, "micro_usd": 74, "stream_usd": 310 }
+    }
+  ]
+}

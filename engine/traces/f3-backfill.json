@@ -1,0 +1,175 @@
+{
+  "id": "f3-backfill",
+  "title": "Backfill: rebuilding 14 days without double-counting",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "03:10 page. The <code>daily_revenue</code> job has been joining on the <em>ingestion-day</em> FX rate instead of the <em>order-day</em> rate since release 41.2 shipped on 2026-06-25. Every daily partition from <strong>06-25 through 07-08 is wrong</strong> — 14 days. Today (07-09) already runs the fixed code, and its hourly loads keep landing while we work.",
+      "state": {
+        "bars": [
+          { "label": "06-25", "value": 100, "max": 100, "hot": true },
+          { "label": "06-26", "value": 100, "max": 100, "hot": true },
+          { "label": "06-27", "value": 100, "max": 100, "hot": true },
+          { "label": "06-28", "value": 100, "max": 100, "hot": true },
+          { "label": "06-29", "value": 100, "max": 100, "hot": true },
+          { "label": "06-30", "value": 100, "max": 100, "hot": true },
+          { "label": "07-01", "value": 100, "max": 100, "hot": true },
+          { "label": "07-02", "value": 100, "max": 100, "hot": true },
+          { "label": "07-03", "value": 100, "max": 100, "hot": true },
+          { "label": "07-04", "value": 100, "max": 100, "hot": true },
+          { "label": "07-05", "value": 100, "max": 100, "hot": true },
+          { "label": "07-06", "value": 100, "max": 100, "hot": true },
+          { "label": "07-07", "value": 100, "max": 100, "hot": true },
+          { "label": "07-08", "value": 100, "max": 100, "hot": true },
+          { "label": "today 07-09 (hourly)", "value": 4, "max": 24, "unit": "h" }
+        ],
+        "note": "red = stale (bad FX rate baked in) · accent = rebuilt with fixed code"
+      },
+      "metrics": { "stale_partitions": 14 }
+    },
+    {
+      "t": 4,
+      "narration": "First, vocabulary: a backfill is not \"fixing the data\" — it is <strong>re-running the transformation for a range of logical dates</strong>. The pipeline takes <code>execution_date</code> as a parameter; we will invoke it 14 times, once per day, exactly as if each day were running on schedule.",
+      "state": {
+        "note": "<code>daily_revenue(execution_date=ds)</code> for ds in 2026-06-25 … 2026-07-08"
+      },
+      "metrics": { "stale_partitions": 14, "runs_needed": 14 }
+    },
+    {
+      "t": 8,
+      "narration": "The naive first attempt, shown so you never make it: rerun 06-25 with an <strong>append</strong> (<code>INSERT INTO revenue SELECT … WHERE ds='2026-06-25'</code>). The partition already holds the bad rows — now it holds bad <em>plus</em> good. <strong>row_count doubles: 1.42M → 2.84M</strong>, and sum(revenue) doubles with it. An append-based backfill is a corruption multiplier, not a fix.",
+      "state": {
+        "bars": [
+          { "label": "06-25 rows (M)", "value": 2.84, "max": 2.84, "unit": "M", "hot": true },
+          { "label": "expected rows (M)", "value": 1.42, "max": 2.84, "unit": "M" }
+        ],
+        "note": "append into a non-empty partition = every rerun adds another full copy"
+      },
+      "metrics": { "row_count_before": 1420000, "row_count_after_append": 2840000 }
+    },
+    {
+      "t": 12,
+      "narration": "Roll that back and switch to the idempotent form: <strong>overwrite at partition granularity</strong> — <code>INSERT OVERWRITE … PARTITION (ds='2026-06-25')</code>, or in Spark <code>.mode('overwrite')</code> with <code>partitionOverwriteMode=dynamic</code>. Run it once: 1.42M rows. Run it five times: still 1.42M. <strong>Idempotence is what makes a 14-day backfill boring instead of terrifying.</strong>",
+      "state": {
+        "bars": [
+          { "label": "06-25 rows (M)", "value": 1.42, "max": 2.84, "unit": "M" }
+        ],
+        "note": "delete-and-replace the partition atomically — reruns are free"
+      },
+      "metrics": { "row_count_after_overwrite": 1420000, "reruns_tested": 5 }
+    },
+    {
+      "t": 16,
+      "narration": "Now the range, in waves of 4 with a resource pool cap — the backfill must not starve tonight's production SLAs. Wave 1 rebuilds 06-25 … 06-28. Meanwhile the hourly job keeps appending to <em>today's</em> partition; the two never touch the same <code>ds</code>, because the backfill range ends at yesterday.",
+      "state": {
+        "bars": [
+          { "label": "06-25", "value": 100, "max": 100 },
+          { "label": "06-26", "value": 100, "max": 100 },
+          { "label": "06-27", "value": 100, "max": 100 },
+          { "label": "06-28", "value": 100, "max": 100 },
+          { "label": "06-29", "value": 100, "max": 100, "hot": true },
+          { "label": "06-30", "value": 100, "max": 100, "hot": true },
+          { "label": "07-01", "value": 100, "max": 100, "hot": true },
+          { "label": "07-02", "value": 100, "max": 100, "hot": true },
+          { "label": "07-03", "value": 100, "max": 100, "hot": true },
+          { "label": "07-04", "value": 100, "max": 100, "hot": true },
+          { "label": "07-05", "value": 100, "max": 100, "hot": true },
+          { "label": "07-06", "value": 100, "max": 100, "hot": true },
+          { "label": "07-07", "value": 100, "max": 100, "hot": true },
+          { "label": "07-08", "value": 100, "max": 100, "hot": true },
+          { "label": "today 07-09 (hourly)", "value": 9, "max": 24, "unit": "h" }
+        ]
+      },
+      "metrics": { "rebuilt": 4, "remaining": 10, "backfill_parallelism": 4 }
+    },
+    {
+      "t": 20,
+      "narration": "Wave 2: through 07-02. Each day-partition is independent, so order does not matter and neither do failures — if the runner dies after day 8, you rerun days 9–14 and the overwrites make the retry free. Contrast that with the append version, where a retry after a partial failure means forensic row archaeology.",
+      "state": {
+        "bars": [
+          { "label": "06-25", "value": 100, "max": 100 },
+          { "label": "06-26", "value": 100, "max": 100 },
+          { "label": "06-27", "value": 100, "max": 100 },
+          { "label": "06-28", "value": 100, "max": 100 },
+          { "label": "06-29", "value": 100, "max": 100 },
+          { "label": "06-30", "value": 100, "max": 100 },
+          { "label": "07-01", "value": 100, "max": 100 },
+          { "label": "07-02", "value": 100, "max": 100 },
+          { "label": "07-03", "value": 100, "max": 100, "hot": true },
+          { "label": "07-04", "value": 100, "max": 100, "hot": true },
+          { "label": "07-05", "value": 100, "max": 100, "hot": true },
+          { "label": "07-06", "value": 100, "max": 100, "hot": true },
+          { "label": "07-07", "value": 100, "max": 100, "hot": true },
+          { "label": "07-08", "value": 100, "max": 100, "hot": true },
+          { "label": "today 07-09 (hourly)", "value": 13, "max": 24, "unit": "h" }
+        ]
+      },
+      "metrics": { "rebuilt": 8, "remaining": 6, "restartable_from_any_day": 1 }
+    },
+    {
+      "t": 24,
+      "narration": "Wave 3: through 07-06. Note what the hourly bar has been doing this whole time — <strong>landing on schedule, untouched</strong>. A well-partitioned table gives you this isolation for free: history is rewritten day by day while the present keeps arriving.",
+      "state": {
+        "bars": [
+          { "label": "06-25", "value": 100, "max": 100 },
+          { "label": "06-26", "value": 100, "max": 100 },
+          { "label": "06-27", "value": 100, "max": 100 },
+          { "label": "06-28", "value": 100, "max": 100 },
+          { "label": "06-29", "value": 100, "max": 100 },
+          { "label": "06-30", "value": 100, "max": 100 },
+          { "label": "07-01", "value": 100, "max": 100 },
+          { "label": "07-02", "value": 100, "max": 100 },
+          { "label": "07-03", "value": 100, "max": 100 },
+          { "label": "07-04", "value": 100, "max": 100 },
+          { "label": "07-05", "value": 100, "max": 100 },
+          { "label": "07-06", "value": 100, "max": 100 },
+          { "label": "07-07", "value": 100, "max": 100, "hot": true },
+          { "label": "07-08", "value": 100, "max": 100, "hot": true },
+          { "label": "today 07-09 (hourly)", "value": 16, "max": 24, "unit": "h" }
+        ]
+      },
+      "metrics": { "rebuilt": 12, "remaining": 2 }
+    },
+    {
+      "t": 28,
+      "narration": "All 14 partitions rebuilt in ~40 minutes. Verify before you declare victory: 06-25 row_count is back to 1.42M (exactly one row per order), and sum(revenue) reconciles against the finance ledger within rounding. A backfill without a verification query is a hope, not an operation.",
+      "state": {
+        "bars": [
+          { "label": "06-25", "value": 100, "max": 100 },
+          { "label": "06-26", "value": 100, "max": 100 },
+          { "label": "06-27", "value": 100, "max": 100 },
+          { "label": "06-28", "value": 100, "max": 100 },
+          { "label": "06-29", "value": 100, "max": 100 },
+          { "label": "06-30", "value": 100, "max": 100 },
+          { "label": "07-01", "value": 100, "max": 100 },
+          { "label": "07-02", "value": 100, "max": 100 },
+          { "label": "07-03", "value": 100, "max": 100 },
+          { "label": "07-04", "value": 100, "max": 100 },
+          { "label": "07-05", "value": 100, "max": 100 },
+          { "label": "07-06", "value": 100, "max": 100 },
+          { "label": "07-07", "value": 100, "max": 100 },
+          { "label": "07-08", "value": 100, "max": 100 },
+          { "label": "today 07-09 (hourly)", "value": 18, "max": 24, "unit": "h" }
+        ]
+      },
+      "metrics": { "rebuilt": 14, "remaining": 0, "wall_clock_min": 40 }
+    },
+    {
+      "t": 32,
+      "narration": "The mental model that made this possible: <strong><code>execution_date</code> is a parameter, not <code>now()</code></strong>. Each run computes <em>f(code, inputs, logical_date)</em> — the 06-25 run executed today must produce byte-for-byte what it would have produced on 06-25. Any <code>now()</code> or <code>CURRENT_DATE</code> buried in transformation logic silently breaks that contract.",
+      "state": {
+        "note": "run = f(code, inputs, execution_date) — a pure function of its logical date<br><code>now()</code> in pipeline logic is a bug factory: it makes reruns produce different answers"
+      },
+      "metrics": { "partitions_rebuilt": 14 }
+    },
+    {
+      "t": 36,
+      "narration": "Design every pipeline as if the 14-day backfill is coming — because it is. Partition by logical date, <strong>overwrite not append</strong>, parameterize on <code>execution_date</code>, cap backfill parallelism below production's share. Then a bad release costs one command and 40 minutes, not a week of manual repair.",
+      "state": {
+        "note": "the checklist: date-partitioned output · idempotent partition overwrite · execution_date parameter · bounded backfill pool · verification query"
+      },
+      "metrics": { "wall_clock_min": 40, "manual_repair_days_avoided": 5 }
+    }
+  ]
+}

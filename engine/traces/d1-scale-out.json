@@ -1,0 +1,152 @@
+{
+  "id": "d1-scale-out",
+  "title": "The single-JVM wall: when a bigger box stops helping",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "02:00 nightly. The <code>customer_360</code> rebuild reads 18 months of <code>orders</code> and <code>order_events</code>, aggregates every customer's lifetime spend, order count and fraud history, and writes the mart the exec dashboard reads at 07:00. A year ago the input was 90 GB and the job ran in 40 minutes on one JVM. Tonight the input is <strong>1.1 TB</strong> and the job is the on-call team's least favorite pager.",
+      "state": {
+        "note": "one process, one JVM, one machine — <code>spark.read...groupBy(\"customer_id\").agg(...)</code> on a single big box"
+      },
+      "metrics": { "input_gb": 1100, "months_of_history": 18 }
+    },
+    {
+      "t": 3,
+      "narration": "The reflex fix — the one every backend engineer reaches for first — is to <strong>scale up</strong>: give the box more RAM. Last year's 128 GB / 16 vCPU instance now can't hold the shuffle in memory; it spills to disk and thrashes. The job finishes, but in <strong>210 minutes</strong>, blowing the 07:00 SLA by an hour.",
+      "state": {
+        "bars": [
+          { "label": "128 GB / 16 vCPU", "value": 210, "max": 220, "unit": "min", "hot": true }
+        ],
+        "note": "heap too small → shuffle spills to local disk → the machine spends the night doing I/O, not math"
+      },
+      "metrics": { "ram_gb": 128, "runtime_min": 210 }
+    },
+    {
+      "t": 6,
+      "narration": "So buy a bigger box: <strong>256 GB / 32 vCPU</strong>. It works — <strong>132 minutes</strong>, back inside the window. Victory is declared in the standup. But look at the machine while it runs: the garbage collector is now eating a visible slice of every core, because one JVM heap this large means longer, more frequent stop-the-world pauses.",
+      "state": {
+        "bars": [
+          { "label": "128 GB / 16 vCPU", "value": 210, "max": 220, "unit": "min", "hot": true },
+          { "label": "256 GB / 32 vCPU", "value": 132, "max": 220, "unit": "min" }
+        ],
+        "note": "GC time is climbing — a bigger heap is not a free lunch, it's a bigger yard to sweep"
+      },
+      "metrics": { "ram_gb": 256, "runtime_min": 132, "gc_cpu_pct": 27 }
+    },
+    {
+      "t": 9,
+      "narration": "Data keeps growing, so scale up again — the <strong>largest single instance the cloud rents</strong>: 512 GB / 64 vCPU. Runtime: <strong>118 minutes</strong>. Read that number twice. Doubling the RAM from 256 to 512 GB — and doubling the hourly bill — bought an <strong>11% speedup</strong>. Meanwhile GC now burns 44% of CPU: over an hour of that 'compute' is the JVM collecting garbage, not aggregating orders.",
+      "state": {
+        "bars": [
+          { "label": "128 GB / 16 vCPU", "value": 210, "max": 220, "unit": "min" },
+          { "label": "256 GB / 32 vCPU", "value": 132, "max": 220, "unit": "min" },
+          { "label": "512 GB / 64 vCPU", "value": 118, "max": 220, "unit": "min", "hot": true }
+        ],
+        "note": "diminishing returns: 2× the hardware, 11% faster — and 44% of CPU is now garbage collection"
+      },
+      "metrics": { "ram_gb": 512, "runtime_min": 118, "gc_cpu_pct": 44 }
+    },
+    {
+      "t": 12,
+      "narration": "This is <strong>the wall</strong>, and it is made of physics, not budget. A single JVM is one heap the GC must sweep as one unit; one set of cores; one NIC pulling 1.1 TB through a single network card; one power supply that is a single point of failure. There is no 1 TB single-tenant box to rent next, and if there were, the GC pauses on that heap would erase the gain. <strong>Scale-up is a staircase that ends at a cliff.</strong>",
+      "state": {
+        "bars": [
+          { "label": "runtime", "value": 118, "max": 220, "unit": "min", "hot": true },
+          { "label": "cost / hour", "value": 210, "max": 220, "unit": "idx", "hot": true }
+        ],
+        "note": "one heap · one CPU socket group · one network card · one machine to lose — the ceiling is a single computer"
+      },
+      "metrics": { "runtime_min": 118, "gc_cpu_pct": 44, "single_points_of_failure": 1 }
+    },
+    {
+      "t": 15,
+      "narration": "The other axis is <strong>scale-out</strong>: stop asking one machine to do everything, and cut the work into pieces that many ordinary machines do in parallel. Spark slices the 1.1 TB into <strong>880 partitions of ~128 MB</strong> — the unit of parallel work — and hands them to <em>executor</em> processes, each its own modest JVM on its own machine. A <em>driver</em> keeps the plan and hands out tasks. Your <code>ExecutorService</code>, but the pool now spans a cluster.",
+      "state": {
+        "note": "1.1 TB ÷ 128 MB ≈ 880 partitions → distributed across many small executor JVMs, coordinated by one driver"
+      },
+      "metrics": { "partitions": 880, "partition_mb": 128 }
+    },
+    {
+      "t": 18,
+      "narration": "Start small: <strong>4 executors</strong>, 16 GB each — 64 GB of RAM total, a quarter of the giant box's memory. Each executor works its slice of partitions at nearly full tilt (no monster heap, so GC is negligible). Runtime: <strong>64 minutes</strong>, already faster than the 512 GB single box, on cheaper hardware.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 94, "label": "p12" }, { "pct": 91, "label": "p13" }, { "pct": 96, "label": "p14" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 92, "label": "p57" }, { "pct": 95, "label": "p58" }, { "pct": 90, "label": "p59" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 96, "label": "p88" }, { "pct": 93, "label": "p89" }, { "pct": 92, "label": "p90" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 91, "label": "p03" }, { "pct": 94, "label": "p04" }, { "pct": 95, "label": "p05" } ] }
+        ],
+        "note": "4 small JVMs, each busy on real work — GC is a rounding error when no single heap is huge"
+      },
+      "metrics": { "executors": 4, "ram_gb_total": 64, "runtime_min": 64 }
+    },
+    {
+      "t": 21,
+      "narration": "Double the executors to <strong>8</strong>. The 880 partitions now spread across twice as many workers, and because the partitions are independent, the runtime roughly halves: <strong>34 minutes</strong>. This is the property scale-up never had — you add capacity by adding <em>machines</em>, and the machines are cheap and interchangeable.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 93, "label": "p12" }, { "pct": 95, "label": "p13" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 92, "label": "p57" }, { "pct": 96, "label": "p58" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 94, "label": "p88" }, { "pct": 90, "label": "p89" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 95, "label": "p03" }, { "pct": 93, "label": "p04" } ] },
+          { "id": "exec-5", "tasks": [ { "pct": 91, "label": "p21" }, { "pct": 96, "label": "p22" } ] },
+          { "id": "exec-6", "tasks": [ { "pct": 94, "label": "p44" }, { "pct": 92, "label": "p45" } ] },
+          { "id": "exec-7", "tasks": [ { "pct": 95, "label": "p66" }, { "pct": 93, "label": "p67" } ] },
+          { "id": "exec-8", "tasks": [ { "pct": 90, "label": "p77" }, { "pct": 94, "label": "p78" } ] }
+        ],
+        "note": "8 executors · 880 partitions ÷ 8 ≈ 110 tasks each — add workers, subtract wall-clock"
+      },
+      "metrics": { "executors": 8, "runtime_min": 34 }
+    },
+    {
+      "t": 24,
+      "narration": "<strong>16 executors</strong>: <strong>19 minutes</strong>. The scaling is close to linear but not perfectly — every doubling adds a little coordination and shuffle-network cost that the driver and the cross-dock must pay. You are trading one machine's hard physical ceiling for a curve that keeps bending down as long as you keep feeding it commodity boxes.",
+      "state": {
+        "executors": [
+          { "id": "exec-01", "tasks": [ { "pct": 93, "label": "p1" } ] },
+          { "id": "exec-02", "tasks": [ { "pct": 95, "label": "p2" } ] },
+          { "id": "exec-03", "tasks": [ { "pct": 92, "label": "p3" } ] },
+          { "id": "exec-04", "tasks": [ { "pct": 96, "label": "p4" } ] },
+          { "id": "exec-05", "tasks": [ { "pct": 94, "label": "p5" } ] },
+          { "id": "exec-06", "tasks": [ { "pct": 91, "label": "p6" } ] },
+          { "id": "exec-07", "tasks": [ { "pct": 95, "label": "p7" } ] },
+          { "id": "exec-08", "tasks": [ { "pct": 93, "label": "p8" } ] },
+          { "id": "exec-09", "tasks": [ { "pct": 92, "label": "p9" } ] },
+          { "id": "exec-10", "tasks": [ { "pct": 96, "label": "p10" } ] },
+          { "id": "exec-11", "tasks": [ { "pct": 90, "label": "p11" } ] },
+          { "id": "exec-12", "tasks": [ { "pct": 94, "label": "p12" } ] },
+          { "id": "exec-13", "tasks": [ { "pct": 95, "label": "p13" } ] },
+          { "id": "exec-14", "tasks": [ { "pct": 92, "label": "p14" } ] },
+          { "id": "exec-15", "tasks": [ { "pct": 93, "label": "p15" } ] },
+          { "id": "exec-16", "tasks": [ { "pct": 96, "label": "p16" } ] }
+        ],
+        "note": "near-linear, not magic: the driver's coordination and the shuffle network are the tax on going wide"
+      },
+      "metrics": { "executors": 16, "runtime_min": 19 }
+    },
+    {
+      "t": 27,
+      "narration": "The full picture, side by side. Scale-up flattened hard — 128 minutes of engineering-and-invoice pain for the last increment. Scale-out took the same job from <strong>118 minutes on one giant box to 11 minutes on 32 small ones</strong>, cheaper in total, and with no single machine whose failure kills the run. This is why Spark exists: it makes 'add more machines' the answer instead of 'buy a mainframe'.",
+      "state": {
+        "bars": [
+          { "label": "1 × 512 GB box", "value": 118, "max": 120, "unit": "min", "hot": true },
+          { "label": "4 executors", "value": 64, "max": 120, "unit": "min" },
+          { "label": "8 executors", "value": 34, "max": 120, "unit": "min" },
+          { "label": "16 executors", "value": 19, "max": 120, "unit": "min" },
+          { "label": "32 executors", "value": 11, "max": 120, "unit": "min" }
+        ],
+        "note": "scale-out beats the biggest single box on speed, cost, and fault tolerance at once"
+      },
+      "metrics": { "single_box_min": 118, "cluster_32_min": 11 }
+    },
+    {
+      "t": 30,
+      "narration": "The mental upgrade to carry out of this module: you already parallelize with an <code>ExecutorService</code> and a thread pool inside <em>one</em> JVM. Spark is that same idea with the pool spread across a fleet — a <strong>driver</strong> that holds the plan (your <code>main</code>), <strong>executors</strong> that run tasks (the worker threads), and a <strong>cluster manager</strong> that hands out machines. The rest of Track D is just learning where each line of your code actually runs.",
+      "state": {
+        "note": "driver = your <code>main()</code> + the plan · executors = the thread pool, one JVM per machine · cluster manager = the scheduler that grants the machines"
+      },
+      "metrics": { "cluster_32_min": 11, "single_box_min": 118 }
+    }
+  ]
+}

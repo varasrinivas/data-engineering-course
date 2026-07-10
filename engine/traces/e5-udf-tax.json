@@ -1,0 +1,112 @@
+{
+  "id": "e5-udf-tax",
+  "title": "The UDF tax: one transform, three prices",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "The task is trivial: uppercase the <code>country</code> column on 40 million order rows for a downstream join key. Three engineers reach for three different tools. Same output, wildly different bills — and the difference is entirely about how many times data crosses the JVM↔Python boundary.",
+      "state": {
+        "note": "transform: <code>country → UPPER(country)</code> · 40,000,000 rows · 4 executors × 4 cores"
+      },
+      "metrics": { "rows_millions": 40, "cores": 16 }
+    },
+    {
+      "t": 3,
+      "narration": "<strong>Option A — the built-in.</strong> <code>F.upper(F.col(\"country\"))</code>. This never leaves the JVM: Catalyst compiles it, Tungsten runs it on the off-heap columnar buffers, whole stages code-generated. The rows stay in Spark's own memory the entire time.",
+      "state": {
+        "bars": [
+          { "label": "F.upper (built-in)", "value": 1.2, "max": 40, "unit": "s" }
+        ],
+        "note": "zero boundary crossings — data stays in Tungsten's columnar format"
+      },
+      "metrics": { "wall_clock_s": 1.2, "boundary_crossings": 0 }
+    },
+    {
+      "t": 6,
+      "narration": "The executors hum: 16 cores stream columnar batches through generated code, all bars near full and even. Nobody is waiting on anybody. This is the baseline every other option is measured against.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 94, "label": "codegen" }, { "pct": 91, "label": "codegen" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 96, "label": "codegen" }, { "pct": 90, "label": "codegen" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 92, "label": "codegen" }, { "pct": 95, "label": "codegen" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 93, "label": "codegen" }, { "pct": 89, "label": "codegen" } ] }
+        ]
+      },
+      "metrics": { "wall_clock_s": 1.2, "cpu_util_pct": 92 }
+    },
+    {
+      "t": 9,
+      "narration": "<strong>Option B — the Python UDF.</strong> <code>@udf; def up(s): return s.upper()</code>. Functionally identical, and 30× slower. Here is why: for every one of 40 million rows, Spark must serialize the value, ship it over a local socket to a Python worker process, deserialize it, run your one line, then serialize the result back and deserialize it into the JVM. Forty million round trips.",
+      "state": {
+        "bars": [
+          { "label": "F.upper (built-in)", "value": 1.2, "max": 40, "unit": "s" },
+          { "label": "Python UDF (row-at-a-time)", "value": 38, "max": 40, "unit": "s", "hot": true }
+        ],
+        "note": "☕ this is the JNI-boundary tax: cheap logic, ruinous crossing cost — same shape as a native call per element"
+      },
+      "metrics": { "wall_clock_s": 38, "boundary_crossings": 40000000, "slowdown_x": 32 }
+    },
+    {
+      "t": 12,
+      "narration": "Watch the executors during the UDF stage: the JVM side is <em>starved</em>, stalled waiting for the Python worker to hand rows back one at a time. Green means the pipe; the hot bars are the Python processes pegged at 100% doing nothing but pickling. The cluster is busy being idle.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 18, "label": "JVM (waiting)" }, { "pct": 99, "hot": true, "label": "py worker: pickle" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 21, "label": "JVM (waiting)" }, { "pct": 98, "hot": true, "label": "py worker: pickle" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 16, "label": "JVM (waiting)" }, { "pct": 99, "hot": true, "label": "py worker: pickle" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 19, "label": "JVM (waiting)" }, { "pct": 97, "hot": true, "label": "py worker: pickle" } ] }
+        ],
+        "note": "serialization dominates; the actual <code>.upper()</code> is a rounding error in the total"
+      },
+      "metrics": { "jvm_util_pct": 19, "serde_pct": 81 }
+    },
+    {
+      "t": 15,
+      "narration": "<strong>Option C — the pandas UDF.</strong> <code>@pandas_udf; def up(s: pd.Series) -> pd.Series: return s.str.upper()</code>. Same Python, same logic — but now Spark ships rows in <strong>Arrow batches of ~10,000</strong>, not one at a time. The boundary is crossed ~4,000 times instead of 40 million, and the crossing itself is zero-copy columnar Arrow, not per-value pickling.",
+      "state": {
+        "bars": [
+          { "label": "F.upper (built-in)", "value": 1.2, "max": 40, "unit": "s" },
+          { "label": "Python UDF (row-at-a-time)", "value": 38, "max": 40, "unit": "s", "hot": true },
+          { "label": "pandas UDF (Arrow batches)", "value": 4.5, "max": 40, "unit": "s" }
+        ],
+        "note": "same boundary, ~10,000× fewer crossings — vectorized, zero-copy Arrow instead of per-row pickle"
+      },
+      "metrics": { "wall_clock_s": 4.5, "boundary_crossings": 4000, "batch_rows": 10000 }
+    },
+    {
+      "t": 18,
+      "narration": "Executors during the pandas-UDF stage: the Python workers now do real vectorized work on whole Series at once, and the JVM side keeps pace feeding Arrow batches. Utilization is high and balanced again — not built-in-fast, but the same order of magnitude, not the same universe as the row UDF.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 82, "label": "JVM: Arrow feed" }, { "pct": 85, "label": "py: vectorized" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 79, "label": "JVM: Arrow feed" }, { "pct": 88, "label": "py: vectorized" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 84, "label": "JVM: Arrow feed" }, { "pct": 83, "label": "py: vectorized" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 80, "label": "JVM: Arrow feed" }, { "pct": 86, "label": "py: vectorized" } ] }
+        ]
+      },
+      "metrics": { "jvm_util_pct": 81, "py_util_pct": 85 }
+    },
+    {
+      "t": 21,
+      "narration": "The three prices, side by side: <strong>1.2s built-in · 38s Python UDF · 4.5s pandas UDF</strong>. The decision rule writes itself. Reach for a built-in or <code>F.expr</code> first — there is one for far more than people expect. If the logic genuinely can't be expressed in built-ins, use a <strong>pandas UDF</strong>, never a plain row-at-a-time <code>@udf</code>.",
+      "state": {
+        "bars": [
+          { "label": "F.upper (built-in)", "value": 1.2, "max": 40, "unit": "s" },
+          { "label": "Python UDF", "value": 38, "max": 40, "unit": "s", "hot": true },
+          { "label": "pandas UDF", "value": 4.5, "max": 40, "unit": "s" }
+        ],
+        "note": "order of preference: built-in / expr → pandas UDF → (almost never) row-at-a-time UDF"
+      },
+      "metrics": { "builtin_s": 1.2, "row_udf_s": 38, "pandas_udf_s": 4.5 }
+    },
+    {
+      "t": 24,
+      "narration": "The trap that makes this a field-notes story rather than a footnote: at 40 thousand rows in a dev notebook, all three finish in well under a second and look identical. The 30× gap only opens at production scale — so the row UDF passes review, passes staging, and detonates the SLA at 3 a.m. on the first full-volume run. Cost is a property of the boundary, and the boundary is invisible until the data is big.",
+      "state": {
+        "note": "dev (40k rows): 0.02s / 0.09s / 0.03s — indistinguishable<br>prod (40M rows): 1.2s / 38s / 4.5s — a paging incident"
+      },
+      "metrics": { "dev_rows": 40000, "prod_rows_millions": 40 }
+    }
+  ]
+}

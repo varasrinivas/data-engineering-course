@@ -1,0 +1,182 @@
+{
+  "id": "h4-platform-run",
+  "title": "The nightly platform run: six sources in, one dashboard green",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "02:00. The NimbusMart platform DAG wakes on schedule. Nothing runs yet — the first row of tasks are <strong>sensors</strong>, each blocking on one upstream export landing in the drop zone. This is the shift supervisor reading the clipboard: no forklift moves until the trucks are confirmed at the dock.",
+      "state": {
+        "note": "waiting on six source exports: <code>orders</code> · <code>order_events</code> · <code>customers</code> + <code>customer_updates</code> · <code>products</code> · <code>fraud_scores</code> + <code>payments</code> · <code>couriers</code> + <code>courier_pings</code>",
+        "bars": [
+          { "label": "orders sensor", "value": 0, "max": 100, "unit": "%", "hot": true },
+          { "label": "fraud_scores sensor", "value": 0, "max": 100, "unit": "%", "hot": true },
+          { "label": "customers sensor", "value": 0, "max": 100, "unit": "%", "hot": true },
+          { "label": "products sensor", "value": 0, "max": 100, "unit": "%", "hot": true },
+          { "label": "payments sensor", "value": 0, "max": 100, "unit": "%", "hot": true },
+          { "label": "couriers sensor", "value": 0, "max": 100, "unit": "%", "hot": true }
+        ]
+      },
+      "metrics": { "sensors_waiting": 6, "tasks_total": 21, "wall_clock_s": 0 }
+    },
+    {
+      "t": 3,
+      "narration": "02:04. All six exports have landed — the sensors clear one by one and release the DAG. The <code>fraud_scores</code> feed arrived last, as it always does (the scoring model runs after the orders close). A late or missing export here fails the sensor and pages on-call; tonight everything is on time.",
+      "state": {
+        "note": "sensors satisfied → the ingest layer is unblocked",
+        "bars": [
+          { "label": "orders sensor", "value": 100, "max": 100, "unit": "%" },
+          { "label": "fraud_scores sensor", "value": 100, "max": 100, "unit": "%" },
+          { "label": "customers sensor", "value": 100, "max": 100, "unit": "%" },
+          { "label": "products sensor", "value": 100, "max": 100, "unit": "%" },
+          { "label": "payments sensor", "value": 100, "max": 100, "unit": "%" },
+          { "label": "couriers sensor", "value": 100, "max": 100, "unit": "%" }
+        ]
+      },
+      "metrics": { "sensors_cleared": 6, "wall_clock_s": 240 }
+    },
+    {
+      "t": 6,
+      "narration": "Bronze ingest fans out — six parallel tasks, each an <em>append</em> that copies its source verbatim into the receiving dock. No typing, no cleaning, no rejects: Bronze's only contract is <strong>land everything, reject nothing, keep the raw shape</strong> so you can always replay. Row counts in, exactly as delivered.",
+      "state": {
+        "bars": [
+          { "label": "orders", "value": 240, "max": 361, "unit": "rows" },
+          { "label": "order_events", "value": 361, "max": 361, "unit": "rows" },
+          { "label": "customers", "value": 60, "max": 361, "unit": "rows" },
+          { "label": "products", "value": 40, "max": 361, "unit": "rows" },
+          { "label": "fraud_scores", "value": 225, "max": 361, "unit": "rows" },
+          { "label": "payments", "value": 228, "max": 361, "unit": "rows" },
+          { "label": "courier_pings", "value": 278, "max": 361, "unit": "rows" }
+        ],
+        "note": "Bronze = raw append · schema-on-read · <code>order_events</code> lands with its drift intact (17 rows missing <code>device</code>, 25 carrying a new <code>app_version</code>)"
+      },
+      "metrics": { "bronze_tables": 7, "bronze_rows_total": 1432, "wall_clock_s": 315 }
+    },
+    {
+      "t": 9,
+      "narration": "Silver's quality gates fire at the Bronze→Silver boundary. Rows are typed to the contract, deduplicated on their business key, and any row that fails an expectation is <strong>routed to quarantine, not dropped silently</strong>. Two gates bite tonight: 15 orders arrived with no fraud score, and 3 customers have a null <code>city</code>.",
+      "state": {
+        "bars": [
+          { "label": "orders → silver (kept)", "value": 225, "max": 240, "unit": "rows" },
+          { "label": "orders → quarantine (unscored)", "value": 15, "max": 240, "unit": "rows", "hot": true },
+          { "label": "customers → silver (kept)", "value": 57, "max": 60, "unit": "rows" },
+          { "label": "customers → quarantine (null city)", "value": 3, "max": 60, "unit": "rows", "hot": true }
+        ],
+        "note": "quarantine is a <em>table</em>, not a log line: an unscored order can't enter the review pipeline, but it's parked where an analyst can see and reprocess it"
+      },
+      "metrics": { "silver_orders": 225, "quarantined_orders": 15, "quarantined_customers": 3, "wall_clock_s": 402 }
+    },
+    {
+      "t": 12,
+      "narration": "The SCD2 customer dimension rebuilds. Most customers are unchanged, but the <code>customer_updates</code> feed carries C-0042's move: <strong>Munich → Hamburg</strong>. The dimension closes the old row (sets its <code>valid_to</code>) and opens a new current row — two versions of one customer, so a May order still joins to Munich and a June order to Hamburg.",
+      "state": {
+        "partitions": [
+          { "label": "C-0042 · Munich (valid_to 06-22)", "size": 52, "hot": false },
+          { "label": "C-0042 · Hamburg (current)", "size": 48, "hot": true }
+        ],
+        "note": "SCD2 = history without overwriting · <code>updated_at</code> Munich 06-05 → Hamburg 06-22 · surrogate key per version keeps every past order's context correct"
+      },
+      "metrics": { "dim_customer_rows": 61, "versioned_customers": 1, "wall_clock_s": 448 }
+    },
+    {
+      "t": 15,
+      "narration": "Gold marts build on top of Silver — the showroom, arranged for the reader. The order fact joins to the customer and seller dimensions; a revenue-by-country rollup aggregates in one shuffle. <strong>FR leads at €22,655 across 58 orders</strong>, AU trails at €10,081. This is the tile the finance dashboard reads at 06:00.",
+      "state": {
+        "bars": [
+          { "label": "FR", "value": 22655, "max": 22655, "unit": "€" },
+          { "label": "US", "value": 19234, "max": 22655, "unit": "€" },
+          { "label": "BR", "value": 19088, "max": 22655, "unit": "€" },
+          { "label": "JP", "value": 17087, "max": 22655, "unit": "€" },
+          { "label": "DE", "value": 13834, "max": 22655, "unit": "€" },
+          { "label": "IN", "value": 12868, "max": 22655, "unit": "€" },
+          { "label": "AU", "value": 10081, "max": 22655, "unit": "€" }
+        ],
+        "note": "<code>gold.revenue_by_country</code> — groupBy(country).agg(sum(total_amount)) · 240 fact rows → 7 summary rows"
+      },
+      "metrics": { "gold_marts": 3, "revenue_rows": 7, "wall_clock_s": 505 }
+    },
+    {
+      "t": 18,
+      "narration": "The fraud-review-queue mart runs the join that the whole capstone points at: Silver orders joined to fraud_scores, filtered to <code>fraud_score &gt;= FRAUD_REVIEW_THRESHOLD</code> (0.80), enriched with customer and seller context. The shuffle for this join is skewed — <strong>seller S-777 owns 80 of 240 orders</strong>, so its partition is the fat one every executor waits on.",
+      "state": {
+        "partitions": [
+          { "label": "S-777", "size": 80, "hot": true },
+          { "label": "S-410", "size": 34 },
+          { "label": "S-204", "size": 31 },
+          { "label": "S-355", "size": 29 },
+          { "label": "S-812", "size": 24 },
+          { "label": "S-101", "size": 22 },
+          { "label": "S-903", "size": 20 }
+        ],
+        "note": "the hot key from module E3 is still here in production — one seller's partition is ~3.6× the others; watch executor-3 carry it"
+      },
+      "metrics": { "review_join_rows": 225, "hot_key_orders": 80, "wall_clock_s": 548 }
+    },
+    {
+      "t": 21,
+      "narration": "The review-queue stage in flight: four executors, three chewing through balanced shards in a blink while <strong>executor-3 sits at 96% on the S-777 partition</strong>. The stage is only as fast as its slowest task — the classic skew tax. In production this is tolerated (a few extra seconds nightly); at 10× the data you'd salt it.",
+      "state": {
+        "executors": [
+          { "id": "exec-1", "tasks": [ { "pct": 100, "label": "S-410+S-101" } ] },
+          { "id": "exec-2", "tasks": [ { "pct": 100, "label": "S-204+S-903" } ] },
+          { "id": "exec-3", "tasks": [ { "pct": 96, "hot": true, "label": "S-777" } ] },
+          { "id": "exec-4", "tasks": [ { "pct": 100, "label": "S-355+S-812" } ] }
+        ],
+        "note": "three executors idle, one still running — the shuffle put 33% of the rows behind a single task"
+      },
+      "metrics": { "executors": 4, "slowest_task_pct": 96, "wall_clock_s": 561 }
+    },
+    {
+      "t": 24,
+      "narration": "The join lands and the filter fires: from 225 scored orders, exactly <strong>43 clear the FRAUD_REVIEW_THRESHOLD</strong> (0.80) — 4 of them sitting precisely on the inclusive boundary. This is the same 43 the SQL acceptance test in H1 pinned as the contract, produced now by the full Bronze→Silver→Gold pipeline. The numbers reconcile.",
+      "state": {
+        "bars": [
+          { "label": "scored orders", "value": 225, "max": 225, "unit": "rows" },
+          { "label": "below threshold (auto-fulfill)", "value": 182, "max": 225, "unit": "rows" },
+          { "label": "review queue (>= 0.80)", "value": 43, "max": 225, "unit": "rows", "hot": true }
+        ],
+        "note": "<code>gold.fraud_review_queue</code> = 43 rows · 4 exactly on FRAUD_REVIEW_THRESHOLD (0.80) · S-777 alone contributes 19 of the 43"
+      },
+      "metrics": { "review_queue": 43, "exactly_threshold": 4, "auto_fulfilled": 182 }
+    },
+    {
+      "t": 27,
+      "narration": "Every downstream task turns green. The DAG's leaf nodes — the dashboard refresh, the freshness check, the row-count reconciliation — run last, because the orchestrator only fires a task when all its parents succeeded. One red upstream would have short-circuited the whole subtree; tonight none did.",
+      "state": {
+        "bars": [
+          { "label": "bronze ingest", "value": 87, "max": 620, "unit": "s" },
+          { "label": "silver gates", "value": 87, "max": 620, "unit": "s" },
+          { "label": "scd2 dim", "value": 46, "max": 620, "unit": "s" },
+          { "label": "gold marts", "value": 57, "max": 620, "unit": "s" },
+          { "label": "review queue", "value": 56, "max": 620, "unit": "s", "hot": true },
+          { "label": "dashboard + checks", "value": 31, "max": 620, "unit": "s" }
+        ],
+        "note": "21 tasks, 0 failures · the review-queue stage is the longest single hop, carrying the skewed join"
+      },
+      "metrics": { "tasks_succeeded": 21, "tasks_failed": 0, "wall_clock_s": 604 }
+    },
+    {
+      "t": 30,
+      "narration": "06:00. The executive dashboard lights up on schedule: <strong>revenue €114,847 across 240 orders, 43 orders in the fraud-review queue, 18 rows quarantined, freshness green</strong>. Every tile traces back through lineage to a Bronze source and a logical date — if finance asks “where did the 43 come from?”, the answer is one lineage click, not an afternoon.",
+      "state": {
+        "bars": [
+          { "label": "revenue (€000)", "value": 114.8, "max": 115, "unit": "k€" },
+          { "label": "orders processed", "value": 240, "max": 240, "unit": "" },
+          { "label": "review queue", "value": 43, "max": 240, "unit": "", "hot": true },
+          { "label": "quarantined", "value": 18, "max": 240, "unit": "" }
+        ],
+        "files": { "count": 14, "avgKb": 96000 },
+        "note": "dashboard: <span style=\"color:var(--green)\">● all green</span> · review queue = 43 · Gold written as 14 right-sized files, ready for the morning read"
+      },
+      "metrics": { "revenue_total": 114847, "review_queue": 43, "quarantined_total": 18, "dashboard_tiles_green": 6 }
+    },
+    {
+      "t": 33,
+      "narration": "That is the platform: <strong>six messy sources → Bronze append → Silver gates + quarantine → SCD2 + Gold marts → an orchestrated DAG → a dashboard that reconciles to 43.</strong> Every module you took is one task on this clipboard — schemas, joins, windows, skew, contracts, backfills, lineage. The capstone was never a new idea; it was all of them, wired together and run once, on time, at 02:00.",
+      "state": {
+        "note": "the whole course, one nightly run: ingest · quality · modeling · orchestration · observability — and the one number that proves it worked, FRAUD_REVIEW_THRESHOLD's 43-row queue, landing green"
+      },
+      "metrics": { "sources": 6, "layers": 3, "tasks": 21, "review_queue": 43, "wall_clock_min": 10 }
+    }
+  ]
+}

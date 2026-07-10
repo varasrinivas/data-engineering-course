@@ -1,0 +1,207 @@
+{
+  "id": "e3-skew-salting",
+  "title": "One hot key melts a stage — salting fixes it",
+  "badge": "simulation",
+  "compare": true,
+  "steps": [
+    {
+      "t": 0,
+      "narration": "Same job, two strategies. We attach seller-level fraud stats (rolled up from <code>fraud_scores</code>) to every order — a sort-merge join on <code>seller_id</code>, 8 shuffle partitions. At production scale that is 240M orders, and seller <strong>S-777</strong> owns 80M of them — one third of the table, exactly the 80/240 skew in our sample. Left: raw key. Right: the same key salted with a random 0–7 suffix.",
+      "state": {
+        "before": {
+          "note": "join key: <code>seller_id</code>"
+        },
+        "after": {
+          "note": "join key: <code>concat(seller_id, '_', floor(rand()*8))</code> — small side exploded once per salt"
+        }
+      },
+      "metrics": { "orders_m": 240, "s777_orders_m": 80, "shuffle_partitions": 8 }
+    },
+    {
+      "t": 4,
+      "narration": "Shuffle write. Rows are routed by <code>hash(key) % 8</code> — and <code>hash('S-777')</code> is a single value, so all 80M hot rows land in partition p3. Salting turns one key into eight (<code>S-777_0 … S-777_7</code>), ~10M rows each, and the strip levels out at ~30M per partition.",
+      "state": {
+        "before": {
+          "partitions": [
+            { "label": "p0", "size": 24 },
+            { "label": "p1", "size": 23 },
+            { "label": "p2", "size": 22 },
+            { "label": "S-777", "size": 80, "hot": true },
+            { "label": "p4", "size": 23 },
+            { "label": "p5", "size": 23 },
+            { "label": "p6", "size": 22 },
+            { "label": "p7", "size": 23 }
+          ]
+        },
+        "after": {
+          "partitions": [
+            { "label": "p0", "size": 30 },
+            { "label": "p1", "size": 31 },
+            { "label": "p2", "size": 29 },
+            { "label": "p3", "size": 30 },
+            { "label": "p4", "size": 30 },
+            { "label": "p5", "size": 31 },
+            { "label": "p6", "size": 29 },
+            { "label": "p7", "size": 30 }
+          ]
+        }
+      },
+      "metrics": { "before_max_partition_m": 80, "after_max_partition_m": 31 }
+    },
+    {
+      "t": 8,
+      "narration": "Reduce tasks launch, one per partition, two per executor. Six seconds in: seven of the left tasks are cruising through ~23M rows each, but p3 must sort-merge 80M alone — 8% done. On the right, every task carries ~30M and they move in lockstep.",
+      "state": {
+        "before": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 34, "label": "p0" }, { "pct": 36, "label": "p1" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 38, "label": "p2" }, { "pct": 8, "hot": true, "label": "p3 · S-777" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 35, "label": "p4" }, { "pct": 33, "label": "p5" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 37, "label": "p6" }, { "pct": 35, "label": "p7" } ] }
+          ]
+        },
+        "after": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 41, "label": "p0" }, { "pct": 40, "label": "p1" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 43, "label": "p2" }, { "pct": 39, "label": "p3" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 40, "label": "p4" }, { "pct": 42, "label": "p5" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 39, "label": "p6" }, { "pct": 41, "label": "p7" } ] }
+          ]
+        }
+      },
+      "metrics": { "before_wall_s": 6, "after_wall_s": 6 }
+    },
+    {
+      "t": 12,
+      "narration": "Why is p3 falling behind faster than 3.5× the rows would predict? Its 9.6 GB sort does not fit the task's 2 GB of execution memory, so it spills — external-sort passes to disk. <strong>Skew is not linear pain</strong>: 3.5× the data becomes ~7× the time once you spill.",
+      "state": {
+        "before": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 72, "label": "p0" }, { "pct": 74, "label": "p1" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 76, "label": "p2" }, { "pct": 15, "hot": true, "label": "p3 · S-777" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 73, "label": "p4" }, { "pct": 71, "label": "p5" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 75, "label": "p6" }, { "pct": 73, "label": "p7" } ] }
+          ],
+          "bars": [
+            { "label": "p3 shuffle read", "value": 9600, "max": 9600, "unit": " MB", "hot": true },
+            { "label": "median task read", "value": 2800, "max": 9600, "unit": " MB" }
+          ]
+        },
+        "after": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 78, "label": "p0" }, { "pct": 77, "label": "p1" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 80, "label": "p2" }, { "pct": 76, "label": "p3" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 77, "label": "p4" }, { "pct": 79, "label": "p5" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 76, "label": "p6" }, { "pct": 78, "label": "p7" } ] }
+          ],
+          "bars": [
+            { "label": "max task read", "value": 3700, "max": 9600, "unit": " MB" },
+            { "label": "median task read", "value": 3600, "max": 9600, "unit": " MB" }
+          ]
+        }
+      },
+      "metrics": { "before_wall_s": 12, "after_wall_s": 12, "before_spill_gb": 14 }
+    },
+    {
+      "t": 16,
+      "narration": "16 seconds: the salted stage <strong>finished at 7s</strong> — its slowest task read 3.7 GB, comfortably in memory. On the left, the seven normal tasks are done too; the stage cannot close until p3 does. This is the Spark UI pattern you will learn to smell: a stage parked at 7/8 tasks.",
+      "state": {
+        "before": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 100, "label": "p0 ✓" }, { "pct": 100, "label": "p1 ✓" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 100, "label": "p2 ✓" }, { "pct": 31, "hot": true, "label": "p3 · S-777" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 100, "label": "p4 ✓" }, { "pct": 100, "label": "p5 ✓" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 100, "label": "p6 ✓" }, { "pct": 100, "label": "p7 ✓" } ] }
+          ]
+        },
+        "after": {
+          "note": "stage complete at <strong>7s</strong> — all 8 tasks within 0.4s of each other"
+        }
+      },
+      "metrics": { "before_wall_s": 16, "after_wall_s": 7 }
+    },
+    {
+      "t": 22,
+      "narration": "The bill for skew is not just time — it is <strong>paid-for cores doing nothing</strong>. Eight cores rented, one working: 87% of this stage's core-seconds are idle wait. The scheduler cannot help; a task is the unit of parallelism, and p3 is indivisible.",
+      "state": {
+        "before": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 55, "hot": true, "label": "p3 · S-777" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] }
+          ]
+        },
+        "after": {
+          "note": "cluster released at 7s — downstream stages already running"
+        }
+      },
+      "metrics": { "before_wall_s": 24, "after_wall_s": 7, "before_idle_cores": 7 }
+    },
+    {
+      "t": 30,
+      "narration": "34 seconds. p3 is on its final merge pass — the bar sits at 96% while the wall clock keeps charging you. In a real UI this is the flat line at <em>199/200 tasks succeeded</em> that pages you at 3am.",
+      "state": {
+        "before": {
+          "executors": [
+            { "id": "exec-1", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] },
+            { "id": "exec-2", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 96, "hot": true, "label": "p3 · S-777" } ] },
+            { "id": "exec-3", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] },
+            { "id": "exec-4", "tasks": [ { "pct": 100, "label": "idle" }, { "pct": 100, "label": "idle" } ] }
+          ]
+        },
+        "after": {
+          "note": "done at 7s"
+        }
+      },
+      "metrics": { "before_wall_s": 34, "after_wall_s": 7 }
+    },
+    {
+      "t": 38,
+      "narration": "Done: <strong>41s vs 7s — 5.9× from a single key</strong>. Same data, same cluster, same answer. The only change was making the hash function's life easier.",
+      "state": {
+        "before": {
+          "bars": [
+            { "label": "stage wall clock", "value": 41, "max": 41, "unit": "s", "hot": true }
+          ]
+        },
+        "after": {
+          "bars": [
+            { "label": "stage wall clock", "value": 7, "max": 41, "unit": "s" }
+          ]
+        }
+      },
+      "metrics": { "before_wall_s": 41, "after_wall_s": 7, "speedup_x": 5.9 }
+    },
+    {
+      "t": 44,
+      "narration": "How salting stays <em>correct</em>: both sides must speak the same key language. The big side gets a random salt; the small side is <strong>exploded once per salt value</strong> — every seller row copied 8 times, so <code>S-777_3</code> still finds its match. If you only salt one side, the join silently drops rows.",
+      "state": {
+        "before": {
+          "note": "orders.key = seller_id<br>seller_stats.key = seller_id"
+        },
+        "after": {
+          "note": "orders.key = seller_id + '_' + rand(0..7)<br>seller_stats × explode(0..7) → seller_id + '_' + salt"
+        }
+      },
+      "metrics": { "salt_buckets": 8 }
+    },
+    {
+      "t": 50,
+      "narration": "The tradeoff, stated plainly: the small side grew <strong>8×</strong> (40M seller rows → 320M shuffled), and any downstream aggregate needs a second pass to merge salted partials back to the real key. That tax is trivial next to a 34s straggler — but only for keys that are actually hot. Salt surgically, measure first, and check whether Spark 3 AQE skew-join handles it before you reach for the manual override.",
+      "state": {
+        "before": {
+          "note": "no extra rows — and a 41s stage"
+        },
+        "after": {
+          "bars": [
+            { "label": "small side rows", "value": 320, "max": 320, "unit": "M", "hot": true },
+            { "label": "small side (unsalted)", "value": 40, "max": 320, "unit": "M" }
+          ],
+          "note": "8× exploded small side + a merge pass — the price of a 5.9× faster stage"
+        }
+      },
+      "metrics": { "small_side_rows_x": 8, "after_wall_s": 7, "before_wall_s": 41 }
+    }
+  ]
+}

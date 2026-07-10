@@ -1,0 +1,97 @@
+{
+  "id": "a2-platform-flow",
+  "title": "One order event down the freight line: dock → QC → showroom",
+  "badge": "simulation",
+  "steps": [
+    {
+      "t": 0,
+      "narration": "18:42:07. A single raw event leaves the NimbusMart app: <code>{order_id:\"O-10188\", event_type:\"checkout_start\", event_ts:\"2026-05-14T18:42:07\", app_version:\"4.2.1\"}</code>. Note what's <em>missing</em> — no <code>device</code> field this time. It rides in on a truck full of a million others just like it, some shaped slightly differently. First stop: the receiving dock.",
+      "state": {
+        "note": "raw clickstream JSON · schema drifts row to row (<code>device</code> sometimes absent, <code>app_version</code> sometimes present)"
+      },
+      "metrics": { "events_today_millions": 1.0 }
+    },
+    {
+      "t": 3,
+      "narration": "<strong>Bronze — the receiving dock.</strong> The rule of the dock is: accept every truck, log everything, reject nothing. The event is appended <em>exactly as it arrived</em>, plus ingestion metadata (<code>ingested_at</code>, <code>source_file</code>, <code>_batch_id</code>). No parsing, no fixing, no dropping. Storage in ≈ storage kept.",
+      "state": {
+        "files": { "count": 1000000, "avgKb": 2 },
+        "note": "Bronze contract: raw + immutable + append-only. If it landed, it is kept — that is the audit trail."
+      },
+      "metrics": { "in": 1000000, "kept": 1000000, "rejected": 0 }
+    },
+    {
+      "t": 6,
+      "narration": "Crucially, Bronze keeps the <em>mess</em>. The missing <code>device</code> stays missing; the surprise <code>app_version</code> stays surprising. Because the dock never edits, you can always replay history — reprocess last Tuesday under today's rules — from this layer. Bronze's job is fidelity, not truth.",
+      "state": {
+        "bars": [
+          { "label": "rows with device", "value": 940000, "max": 1000000, "unit": "rows" },
+          { "label": "rows missing device (drift)", "value": 60000, "max": 1000000, "unit": "rows", "hot": true },
+          { "label": "rows with app_version (drift)", "value": 80000, "max": 1000000, "unit": "rows" }
+        ],
+        "note": "the drift is preserved on purpose — Bronze is the replayable source of record, warts and all"
+      },
+      "metrics": { "missing_device": 60000, "with_app_version": 80000 }
+    },
+    {
+      "t": 9,
+      "narration": "<strong>Silver — the QC station.</strong> Unpack, inspect, standardize, discard the damaged (with a record). The pallet is opened: timestamps parsed to real <code>timestamp</code> type, schema enforced, missing <code>device</code> coalesced to <code>'unknown'</code>, and at-least-once duplicates from the stream collapsed. Damaged goods don't get shipped — but they don't vanish either.",
+      "state": {
+        "bars": [
+          { "label": "arrived from Bronze", "value": 1000000, "max": 1000000, "unit": "rows" },
+          { "label": "passed QC → Silver", "value": 958000, "max": 1000000, "unit": "rows" },
+          { "label": "quarantined", "value": 42000, "max": 1000000, "unit": "rows", "hot": true }
+        ],
+        "note": "Silver contract: typed, deduplicated, conformed schema — one clean row per real event"
+      },
+      "metrics": { "in": 1000000, "passed": 958000, "quarantined": 42000 }
+    },
+    {
+      "t": 12,
+      "narration": "Where did the 42,000 go? Not deleted — routed to a <strong>quarantine table with a reason column</strong>: 20,000 had a null <code>order_id</code> (can't join to anything), 15,000 carried an <code>event_ts</code> that wouldn't parse, 7,000 were exact duplicates from the app retrying. Our O-10188 event parses clean and passes — its <code>device</code> is now <code>'unknown'</code> rather than absent.",
+      "state": {
+        "bars": [
+          { "label": "null order_id", "value": 20000, "max": 42000, "unit": "rows", "hot": true },
+          { "label": "unparseable event_ts", "value": 15000, "max": 42000, "unit": "rows", "hot": true },
+          { "label": "duplicate events", "value": 7000, "max": 42000, "unit": "rows" }
+        ],
+        "note": "quarantine, don't drop: every rejected row is queryable with a reason — that's how you debug the producer"
+      },
+      "metrics": { "null_order_id": 20000, "bad_ts": 15000, "dupes": 7000 }
+    },
+    {
+      "t": 15,
+      "narration": "<strong>Gold — the showroom.</strong> Arranged for the customer, not the warehouse. The clean events are joined to <code>fraud_scores</code> and folded into business-ready marts: an hourly checkout funnel, and the <strong>fraud-review queue</strong> where orders with <code>fraud_score &gt;= FRAUD_REVIEW_THRESHOLD</code> (the 0.80 rule) surface for a human. A million raw events become a few thousand rows a person actually reads.",
+      "state": {
+        "bars": [
+          { "label": "clean events (Silver)", "value": 958000, "max": 958000, "unit": "rows" },
+          { "label": "funnel mart rows (Gold)", "value": 1440, "max": 958000, "unit": "rows" },
+          { "label": "review-queue rows (Gold)", "value": 4300, "max": 958000, "unit": "rows" }
+        ],
+        "note": "Gold contract: aggregated, joined, business-labeled — shaped for a dashboard or a reviewer, not for storage"
+      },
+      "metrics": { "events": 958000, "funnel_rows": 1440, "review_rows": 4300 }
+    },
+    {
+      "t": 18,
+      "narration": "Step back and read the three volumes as a trade. Each layer spends rows to buy something different: <strong>Bronze buys fidelity</strong> (everything, raw, replayable), <strong>Silver buys trust</strong> (typed, deduped, conformed), <strong>Gold buys usefulness</strong> (aggregated, joined, ready to serve). The pile shrinks because value, not volume, is the point downstream.",
+      "state": {
+        "bars": [
+          { "label": "Bronze (fidelity)", "value": 1000000, "max": 1000000, "unit": "rows" },
+          { "label": "Silver (trust)", "value": 958000, "max": 1000000, "unit": "rows" },
+          { "label": "Gold (usefulness)", "value": 5740, "max": 1000000, "unit": "rows" }
+        ],
+        "note": "volume ↓ / value ↑ at every stage — the classic medallion narrowing"
+      },
+      "metrics": { "bronze": 1000000, "silver": 958000, "gold": 5740 }
+    },
+    {
+      "t": 21,
+      "narration": "That's the whole freight line in one event: the <strong>dock</strong> accepts and logs, the <strong>QC station</strong> inspects and conforms, the <strong>showroom</strong> arranges and serves. You <em>query</em> the showroom, but when a number looks wrong you <em>audit</em> back through QC to the dock — because the dock kept the original truck. Ingest → transform → serve isn't three teams; it's one flow with three contracts.",
+      "state": {
+        "note": "serve from Gold · debug through Silver · replay from Bronze — three layers, one immutable lineage"
+      },
+      "metrics": { "layers": 3 }
+    }
+  ]
+}
